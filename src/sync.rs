@@ -19,6 +19,9 @@ pub async fn run(mut config: Config, db: Db, opts: SyncOpts) -> Result<()> {
     if let Some(delay) = opts.delay {
         config.concurrency.delay_between_requests_ms = delay;
     }
+    if !opts.extensions.is_empty() {
+        config.sync.allowed_extensions = opts.extensions.clone();
+    }
 
     // First run: open folder selector if no selections saved and no CLI include specified.
     let has_selections = {

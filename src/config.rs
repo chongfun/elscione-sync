@@ -95,6 +95,9 @@ pub struct SyncConfig {
     /// Glob-style patterns to exclude.
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
+    /// Only download files with these extensions (e.g. ["epub"]). Empty = all extensions.
+    #[serde(default)]
+    pub allowed_extensions: Vec<String>,
     /// Re-download a file when Last-Modified is unchanged but local size differs.
     #[serde(default = "default_true")]
     pub redownload_on_size_mismatch: bool,

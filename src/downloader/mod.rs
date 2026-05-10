@@ -5,7 +5,7 @@ use bytesize::ByteSize;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::crawler::rate_limiter::{build_client, RateLimiter};
@@ -21,14 +21,42 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
     let output_dir = config.output.dir.clone();
 
     loop {
-        // Fetch a batch of pending files.
-        let pending = {
+        let mut pending = {
             let conn = db.lock().unwrap();
             models::files_by_status(&conn, "pending")?
         };
 
+        if !config.sync.allowed_extensions.is_empty() {
+            let mut filtered = Vec::new();
+            for record in pending {
+                let ext = std::path::Path::new(&record.remote_url)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                
+                if config.sync.allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(ext)) {
+                    filtered.push(record);
+                } else {
+                    debug!("Skipping file during download (extension not allowed): {}", record.remote_url);
+                    let conn = db.lock().unwrap();
+                    let _ = models::set_file_status(&conn, record.id, "skipped", None, None);
+                }
+            }
+            pending = filtered;
+        }
+
         if pending.is_empty() {
-            break;
+            // Check if there are any pending files left in the DB. If we skipped the whole
+            // batch, we should fetch the next batch. If there are truly no pending files, break.
+            let count = {
+                let conn = db.lock().unwrap();
+                conn.query_row("SELECT COUNT(*) FROM files WHERE status='pending'", [], |r| r.get::<_, i64>(0)).unwrap_or(0)
+            };
+            if count == 0 {
+                break;
+            } else {
+                continue;
+            }
         }
 
         // Calculate total size of this batch for the overall progress bar.
@@ -142,8 +170,22 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                 .await
                 {
                     Ok(checksum) => {
-                        pb.finish_and_clear();
-                        info!("✓ {}", record.remote_path);
+                        // Force the progress bar to 100% in case the actual file size
+                        // was slightly smaller than the server's reported size.
+                        if let Some(len) = pb.length() {
+                            pb.set_position(len);
+                        }
+                        
+                        // Change the style slightly for completed items and leave it on screen
+                        pb.set_style(
+                            indicatif::ProgressStyle::with_template(
+                                "  ✓ {wide_msg} [{bar:30.green/dim}] {bytes}/{total_bytes}",
+                            )
+                            .unwrap()
+                            .progress_chars("=>-"),
+                        );
+                        pb.finish_with_message(file_name.clone());
+
                         let conn = db.lock().unwrap();
                         let _ = models::set_file_status(
                             &conn,
@@ -155,7 +197,7 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                     }
                     Err(e) => {
                         pb.finish_and_clear();
-                        error!("✗ {}: {e}", record.remote_path);
+                        let _ = multi.println(format!("✗ {}: {}", record.remote_path, e));
                         let conn = db.lock().unwrap();
                         let _ = models::record_error(&conn, record.id, &e.to_string());
                     }

@@ -131,6 +131,19 @@ pub async fn run(
                     if de.is_dir {
                         models::enqueue_crawl(&conn, &de.url, entry.depth + 1)?;
                     } else {
+                        // Apply extension filter
+                        if !config.sync.allowed_extensions.is_empty() {
+                            let ext = std::path::Path::new(&de.url)
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("");
+                            
+                            if !config.sync.allowed_extensions.iter().any(|allowed| allowed.eq_ignore_ascii_case(ext)) {
+                                debug!("Skipping file (extension not allowed): {}", de.url);
+                                continue;
+                            }
+                        }
+
                         let remote_path = url_to_path(&de.url, &config.server.base_url);
                         models::upsert_file(
                             &conn,

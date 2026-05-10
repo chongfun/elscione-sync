@@ -43,6 +43,8 @@ pub enum Commands {
         #[arg(long)]
         status: Option<String>,
     },
+    /// Open the config.toml file in your default editor
+    EditConfig,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -66,6 +68,10 @@ pub struct SyncOpts {
     /// Exclude glob patterns (can be repeated)
     #[arg(long = "exclude")]
     pub exclude: Vec<String>,
+
+    /// Only download files with these extensions (can be repeated, e.g. --extension epub)
+    #[arg(long = "extension")]
+    pub extensions: Vec<String>,
 
     /// Crawl and plan without downloading any files
     #[arg(long)]

@@ -6,7 +6,7 @@ mod downloader;
 mod tui;
 mod sync;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cli::{Cli, Commands};
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -52,6 +52,39 @@ async fn main() -> Result<()> {
         }
         Some(Commands::List { filter, status }) => {
             sync::list(&db, filter.as_deref(), status.as_deref())?;
+        }
+        Some(Commands::EditConfig) => {
+            let path = cli.config.clone().unwrap_or_else(|| config::default_config_path());
+            
+            // Ensure config exists before trying to open it
+            if !path.exists() {
+                let _ = config::load(Some(&path))?;
+            }
+            
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                if cfg!(target_os = "macos") {
+                    "open".to_string()
+                } else if cfg!(target_os = "windows") {
+                    "notepad".to_string()
+                } else {
+                    "vi".to_string()
+                }
+            });
+
+            println!("Opening {} in {}...", path.display(), editor);
+
+            if editor == "open" {
+                std::process::Command::new("open")
+                    .arg("-t")
+                    .arg(&path)
+                    .status()
+                    .with_context(|| format!("Failed to open editor: open -t {}", path.display()))?;
+            } else {
+                std::process::Command::new(&editor)
+                    .arg(&path)
+                    .status()
+                    .with_context(|| format!("Failed to open editor: {} {}", editor, path.display()))?;
+            }
         }
     }
 
