@@ -14,6 +14,34 @@ use crate::db::{models, Db};
 /// Run the download phase — pulls all `pending` files from the DB and downloads
 /// them concurrently up to `max_parallel_downloads`.
 pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
+    // 1. Initial cleanup/sync: Filter and mark files that don't match allowed extensions as skipped
+    // This ensures our "Download queue" log and progress bars are accurate.
+    if !config.sync.allowed_extensions.is_empty() {
+        let conn = db.lock().unwrap();
+        let pending = models::files_by_status(&conn, "pending")?;
+        for record in pending {
+            let ext = std::path::Path::new(&record.remote_url)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if !config.sync.allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(ext)) {
+                let _ = models::set_file_status(&conn, record.id, "skipped", None, None);
+            }
+        }
+    }
+
+    // 2. Print accurate summary
+    {
+        let conn = db.lock().unwrap();
+        let pending_bytes = models::pending_bytes(&conn)?;
+        let pending_count = conn.query_row("SELECT COUNT(*) FROM files WHERE status='pending'", [], |r| r.get::<_, i64>(0))?;
+        info!(
+            "Download queue: {} file(s) / {}",
+            pending_count,
+            ByteSize(pending_bytes as u64)
+        );
+    }
+
     let client = build_client(&config.server.user_agent)?;
     let limiter = RateLimiter::new(config.concurrency.delay_between_requests_ms);
     let semaphore = Arc::new(Semaphore::new(config.concurrency.max_parallel_downloads));
@@ -170,21 +198,22 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                 .await
                 {
                     Ok(checksum) => {
-                        // Force the progress bar to 100% in case the actual file size
-                        // was slightly smaller than the server's reported size.
+                        // Force the progress bar to 100% and finish it so it stops ticking.
                         if let Some(len) = pb.length() {
                             pb.set_position(len);
                         }
+                        pb.finish_and_clear();
                         
-                        // Change the style slightly for completed items and leave it on screen
-                        pb.set_style(
-                            indicatif::ProgressStyle::with_template(
-                                "  ✓ {wide_msg} [{bar:30.green/dim}] {bytes}/{total_bytes}",
-                            )
-                            .unwrap()
-                            .progress_chars("=>-"),
-                        );
-                        pb.finish_with_message(file_name.clone());
+                        // Explicitly remove it from MultiProgress to prevent memory/redraw leaks
+                        // over long syncs.
+                        multi.remove(&pb);
+
+                        // Print a clean, permanent success line
+                        let size_str = bytesize::ByteSize(record.size_bytes.unwrap_or(0) as u64).to_string();
+                        let _ = multi.println(format!(
+                            "  ✓ {} ({})",
+                            file_name, size_str
+                        ));
 
                         let conn = db.lock().unwrap();
                         let _ = models::set_file_status(
@@ -197,7 +226,8 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                     }
                     Err(e) => {
                         pb.finish_and_clear();
-                        let _ = multi.println(format!("✗ {}: {}", record.remote_path, e));
+                        multi.remove(&pb);
+                        let _ = multi.println(format!("  ✗ {}: {}", record.remote_path, e));
                         let conn = db.lock().unwrap();
                         let _ = models::record_error(&conn, record.id, &e.to_string());
                     }

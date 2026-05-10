@@ -74,18 +74,6 @@ pub async fn run(mut config: Config, db: Db, opts: SyncOpts) -> Result<()> {
         info!("--resume: skipping crawl, downloading pending files only.");
     }
 
-    // Print pending summary.
-    {
-        let conn = db.lock().unwrap();
-        let pending_bytes = models::pending_bytes(&conn)?;
-        let pending_count = models::files_by_status(&conn, "pending")?.len();
-        info!(
-            "Download queue: {} file(s) / {}",
-            pending_count,
-            ByteSize(pending_bytes as u64)
-        );
-    }
-
     // ── Download Phase ──
     info!("Starting download phase …");
     downloader::run(&config, &db, opts.dry_run).await?;
