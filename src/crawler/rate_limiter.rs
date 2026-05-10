@@ -24,8 +24,8 @@ impl RateLimiter {
 pub fn build_client(user_agent: &str) -> Result<Client> {
     let client = Client::builder()
         .user_agent(user_agent)
-        .timeout(Duration::from_secs(60))
-        .tcp_keepalive(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(30))
+        .tcp_keepalive(Duration::from_secs(60))
         .build()?;
     Ok(client)
 }
