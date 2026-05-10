@@ -1,0 +1,59 @@
+[package]
+name = "elscione-sync"
+version = "0.1.0"
+edition = "2021"
+description = "Resumable file mirror for server.elscione.com"
+authors = []
+
+[[bin]]
+name = "elscione-sync"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+# HTML parsing
+scraper = "0.21"
+# SQLite state database
+rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite_migration = "1"
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# CLI
+clap = { version = "4", features = ["derive"] }
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+# Progress bars
+indicatif = { version = "0.17", features = ["tokio"] }
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+# Error handling
+anyhow = "1"
+thiserror = "2"
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Async utilities
+futures = "0.3"
+# File timestamps
+filetime = "0.2"
+# SHA-256
+sha2 = "0.10"
+# Byte formatting
+bytesize = "1"
+# Directories (XDG config/data paths)
+directories = "5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
