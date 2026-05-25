@@ -55,6 +55,13 @@ pub struct ConcurrencyConfig {
     pub delay_between_requests_ms: u64,
     /// Milliseconds to wait between directory crawl requests specifically.
     pub crawl_delay_ms: u64,
+    /// Maximum retry attempts for directory crawling fetches.
+    #[serde(default = "default_max_crawl_retries")]
+    pub max_crawl_retries: usize,
+}
+
+fn default_max_crawl_retries() -> usize {
+    3
 }
 
 impl Default for ConcurrencyConfig {
@@ -63,6 +70,7 @@ impl Default for ConcurrencyConfig {
             max_parallel_downloads: 2,
             delay_between_requests_ms: 1500,
             crawl_delay_ms: 500,
+            max_crawl_retries: 3,
         }
     }
 }

@@ -133,6 +133,7 @@ pub async fn run(
             let entry_id = entry.id;
             let entry_depth = entry.depth;
             let cancel_token = cancel_token.clone();
+            let max_retries = config.concurrency.max_crawl_retries;
 
             futures.push(tokio::spawn(async move {
                 let _permit = tokio::select! {
@@ -146,9 +147,32 @@ pub async fn run(
                     _ = cancel_token.cancelled() => return None,
                 };
                 
-                let res = tokio::select! {
-                    res = fetch_directory(&client, &limiter, &url, &base_url) => res,
-                    _ = cancel_token.cancelled() => return None,
+                let mut attempts = 0;
+                let res = loop {
+                    attempts += 1;
+                    
+                    let res = tokio::select! {
+                        res = fetch_directory(&client, &limiter, &url, &base_url) => res,
+                        _ = cancel_token.cancelled() => return None,
+                    };
+                    
+                    match res {
+                        Ok(entries) => break Ok(entries),
+                        Err(e) => {
+                            if attempts >= max_retries {
+                                break Err(e);
+                            } else {
+                                warn!("Attempt {} to fetch {} failed: {}. Retrying...", attempts, url, e);
+                                let sleep_res = tokio::select! {
+                                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => Ok(()),
+                                    _ = cancel_token.cancelled() => Err(()),
+                                };
+                                if sleep_res.is_err() {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
                 };
                 
                 Some((entry_id, entry_depth, url, res))
