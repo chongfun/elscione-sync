@@ -359,8 +359,8 @@ pub(crate) async fn try_h5ai(
         }
     };
 
-    let entries = parse_h5ai_response(&json, base, &href);
-    entries
+    
+    parse_h5ai_response(&json, base, &href)
 }
 
 /// Extract the h5ai CSRF token from the `<meta name="clckd">` tag.

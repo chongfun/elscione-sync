@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
             sync::list(&db, filter.as_deref(), status.as_deref()).await?;
         }
         Some(Commands::EditConfig) => {
-            let path = cli.config.clone().unwrap_or_else(|| config::default_config_path());
+            let path = cli.config.clone().unwrap_or_else(config::default_config_path);
             
             // Ensure config exists before trying to open it
             if !path.exists() {

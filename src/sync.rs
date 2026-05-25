@@ -139,7 +139,7 @@ pub async fn list(db: &Db, filter: Option<&str>, status: Option<&str>) -> Result
     let files = crate::db::run_blocking(db, move |conn| {
         Ok(models::list_files(conn, filter.as_deref(), status.as_deref())?)
     }).await?;
-    println!("{:<10} {:<12} {:<10} {}", "ID", "STATUS", "SIZE", "PATH");
+    println!("{:<10} {:<12} {:<10} PATH", "ID", "STATUS", "SIZE");
     for f in &files {
         let size = f
             .size_bytes

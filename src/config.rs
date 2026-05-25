@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// Top-level application configuration (mirrors config.toml structure).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -176,17 +177,6 @@ pub fn save(config: &Config, path: &Path) -> Result<()> {
     Ok(())
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: Default::default(),
-            output: Default::default(),
-            concurrency: Default::default(),
-            rate_limit: Default::default(),
-            sync: Default::default(),
-        }
-    }
-}
 
 impl Config {
     pub fn validate(&self) -> Result<()> {
