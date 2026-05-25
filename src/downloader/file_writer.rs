@@ -90,10 +90,6 @@ pub async fn download_file(
         if let Some(p) = pb {
             p.inc(resumed_bytes);
         }
-        if let (Some(o), Some(rem)) = (overall, &remaining_bytes) {
-            let current_rem = rem.fetch_sub(resumed_bytes, std::sync::atomic::Ordering::Relaxed).saturating_sub(resumed_bytes);
-            o.set_message(format!("{} remaining", bytesize::ByteSize(current_rem)));
-        }
 
         fs::OpenOptions::new()
             .write(true)
