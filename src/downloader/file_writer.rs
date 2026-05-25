@@ -73,7 +73,7 @@ pub async fn download_file(
             o.set_message(format!("{} remaining", bytesize::ByteSize(current_rem)));
         }
     }
-    file.flush().await?;
+    file.sync_all().await?;
     drop(file);
 
     // Atomic rename.
