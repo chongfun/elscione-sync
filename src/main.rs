@@ -33,13 +33,23 @@ async fn main() -> Result<()> {
     // Open DB
     let db = db::open(&config)?;
 
+    // Create a cancellation token for graceful shutdown
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let ct = cancel_token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::warn!("Ctrl-C received! Initiating graceful shutdown...");
+            ct.cancel();
+        }
+    });
+
     match &cli.command {
         None | Some(Commands::Sync(_)) => {
             let opts = match &cli.command {
                 Some(Commands::Sync(o)) => o.clone(),
                 _ => Default::default(),
             };
-            sync::run(config, db, opts).await?;
+            sync::run(config, db, opts, cancel_token).await?;
         }
         Some(Commands::Select) => {
             tui::run_folder_selector(&config, &db).await?;

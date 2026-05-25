@@ -8,7 +8,12 @@ use crate::db::{models, Db};
 use crate::{crawler, downloader, tui};
 
 /// Main sync entry point — runs folder selection (if needed), crawl, and download phases.
-pub async fn run(mut config: Config, db: Db, opts: SyncOpts) -> Result<()> {
+pub async fn run(
+    mut config: Config,
+    db: Db,
+    opts: SyncOpts,
+    cancel_token: tokio_util::sync::CancellationToken,
+) -> Result<()> {
     // Apply CLI overrides to config.
     if let Some(output) = opts.output {
         config.output.dir = output;
@@ -63,23 +68,37 @@ pub async fn run(mut config: Config, db: Db, opts: SyncOpts) -> Result<()> {
 
     // ── Crawl Phase ──
     if !opts.resume {
+        if cancel_token.is_cancelled() {
+            info!("Sync cancelled before crawl phase.");
+            return Ok(());
+        }
         info!("Starting crawl phase …");
         crawler::run(
             &config,
             &db,
             &include_folders,
             &opts.exclude,
+            cancel_token.clone(),
         )
         .await?;
     } else {
         info!("--resume: skipping crawl, downloading pending files only.");
     }
 
+    if cancel_token.is_cancelled() {
+        info!("Sync cancelled before download phase.");
+        return Ok(());
+    }
+
     // ── Download Phase ──
     info!("Starting download phase …");
-    downloader::run(&config, &db, opts.dry_run).await?;
+    downloader::run(&config, &db, opts.dry_run, cancel_token.clone()).await?;
 
-    print_status(&db).await?;
+    if cancel_token.is_cancelled() {
+        info!("Sync was cancelled by user.");
+    } else {
+        print_status(&db).await?;
+    }
     Ok(())
 }
 

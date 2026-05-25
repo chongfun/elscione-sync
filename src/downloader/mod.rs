@@ -11,9 +11,12 @@ use crate::config::Config;
 use crate::crawler::rate_limiter::{build_client, RateLimiter};
 use crate::db::{models, Db};
 
-/// Run the download phase — pulls all `pending` files from the DB and downloads
-/// them concurrently up to `max_parallel_downloads`.
-pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
+pub async fn run(
+    config: &Config,
+    db: &Db,
+    dry_run: bool,
+    cancel_token: tokio_util::sync::CancellationToken,
+) -> Result<()> {
     // 1. Initial cleanup/sync: Filter and mark files that don't match allowed extensions as skipped
     // This ensures our "Download queue" log and progress bars are accurate.
     if !config.sync.allowed_extensions.is_empty() {
@@ -54,6 +57,10 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
     let output_dir = config.output.dir.clone();
 
     loop {
+        if cancel_token.is_cancelled() {
+            break;
+        }
+
         let mut pending = crate::db::run_blocking(db, |conn| {
             Ok(models::files_by_status(conn, "pending")?)
         }).await?;
@@ -121,6 +128,10 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
         let mut handles = Vec::new();
 
         for record in pending {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
             if dry_run {
                 info!("[DRY RUN] Would download: {}", record.remote_path);
                 let record_id = record.id;
@@ -139,7 +150,6 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                 }).await?;
             }
 
-            let permit = semaphore.clone().acquire_owned().await?;
             let client = client.clone();
             let limiter = limiter.clone();
             let db = db.clone();
@@ -148,9 +158,30 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
             let overall = overall.clone();
             let remaining_bytes = remaining_bytes.clone();
             let redownload_on_mismatch = config.sync.redownload_on_size_mismatch;
+            let cancel_token = cancel_token.clone();
+            let semaphore = semaphore.clone();
 
             let handle = tokio::spawn(async move {
-                let _permit = permit;
+                let _permit = tokio::select! {
+                    p = semaphore.acquire_owned() => match p {
+                        Ok(permit) => permit,
+                        Err(e) => {
+                            warn!("Semaphore acquire failed: {e}");
+                            return;
+                        }
+                    },
+                    _ = cancel_token.cancelled() => {
+                        return;
+                    }
+                };
+
+                if cancel_token.is_cancelled() {
+                    let record_id = record.id;
+                    let _ = crate::db::run_blocking(&db, move |conn| {
+                        Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
+                    }).await;
+                    return;
+                }
 
                 let dest_path = {
                     let rel = record.remote_path.trim_start_matches('/');
@@ -211,9 +242,20 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                 pb.set_message(file_name.clone());
 
                 // Wait for rate limiter before each download.
-                limiter.wait().await;
+                tokio::select! {
+                    _ = limiter.wait() => {},
+                    _ = cancel_token.cancelled() => {
+                        pb.finish_and_clear();
+                        multi.remove(&pb);
+                        let record_id = record.id;
+                        let _ = crate::db::run_blocking(&db, move |conn| {
+                            Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
+                        }).await;
+                        return;
+                    }
+                }
 
-                match file_writer::download_file(
+                let download_fut = file_writer::download_file(
                     &client,
                     &record.remote_url,
                     &dest_path,
@@ -221,47 +263,60 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                     Some(&pb),
                     Some(&overall),
                     Some(remaining_bytes),
-                )
-                .await
-                {
-                    Ok(checksum) => {
-                        // Force the progress bar to 100% and finish it so it stops ticking.
-                        if let Some(len) = pb.length() {
-                            pb.set_position(len);
+                );
+
+                tokio::select! {
+                    res = download_fut => {
+                        match res {
+                            Ok(checksum) => {
+                                // Force the progress bar to 100% and finish it so it stops ticking.
+                                if let Some(len) = pb.length() {
+                                    pb.set_position(len);
+                                }
+                                pb.finish_and_clear();
+                                
+                                // Explicitly remove it from MultiProgress to prevent memory/redraw leaks
+                                // over long syncs.
+                                multi.remove(&pb);
+
+                                // Print a clean, permanent success line
+                                let size_str = bytesize::ByteSize(record.size_bytes.unwrap_or(0) as u64).to_string();
+                                let _ = multi.println(format!(
+                                    "  ✓ {} ({})",
+                                    file_name, size_str
+                                ));
+
+                                let record_id = record.id;
+                                let checksum_clone = checksum.clone();
+                                let _ = crate::db::run_blocking(&db, move |conn| {
+                                    Ok(models::set_file_status(
+                                        conn,
+                                        record_id,
+                                        "done",
+                                        None,
+                                        Some(&checksum_clone),
+                                    )?)
+                                }).await;
+                            }
+                            Err(e) => {
+                                pb.finish_and_clear();
+                                multi.remove(&pb);
+                                let _ = multi.println(format!("  ✗ {}: {}", record.remote_path, e));
+                                let record_id = record.id;
+                                let err_msg = e.to_string();
+                                let _ = crate::db::run_blocking(&db, move |conn| {
+                                    Ok(models::record_error(conn, record_id, &err_msg)?)
+                                }).await;
+                            }
                         }
-                        pb.finish_and_clear();
-                        
-                        // Explicitly remove it from MultiProgress to prevent memory/redraw leaks
-                        // over long syncs.
-                        multi.remove(&pb);
-
-                        // Print a clean, permanent success line
-                        let size_str = bytesize::ByteSize(record.size_bytes.unwrap_or(0) as u64).to_string();
-                        let _ = multi.println(format!(
-                            "  ✓ {} ({})",
-                            file_name, size_str
-                        ));
-
-                        let record_id = record.id;
-                        let checksum_clone = checksum.clone();
-                        let _ = crate::db::run_blocking(&db, move |conn| {
-                            Ok(models::set_file_status(
-                                conn,
-                                record_id,
-                                "done",
-                                None,
-                                Some(&checksum_clone),
-                            )?)
-                        }).await;
                     }
-                    Err(e) => {
+                    _ = cancel_token.cancelled() => {
                         pb.finish_and_clear();
                         multi.remove(&pb);
-                        let _ = multi.println(format!("  ✗ {}: {}", record.remote_path, e));
+                        let _ = multi.println(format!("  ✗ {}: Interrupted by user cancellation", record.remote_path));
                         let record_id = record.id;
-                        let err_msg = e.to_string();
                         let _ = crate::db::run_blocking(&db, move |conn| {
-                            Ok(models::record_error(conn, record_id, &err_msg)?)
+                            Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
                         }).await;
                     }
                 }

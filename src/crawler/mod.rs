@@ -18,6 +18,7 @@ pub async fn run(
     db: &Db,
     include_overrides: &[String],
     exclude_overrides: &[String],
+    cancel_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let client = build_client(&config.server.user_agent)?;
     let limiter = RateLimiter::new(config.concurrency.crawl_delay_ms);
@@ -67,6 +68,10 @@ pub async fn run(
     let mut files_found: u64 = 0;
 
     loop {
+        if cancel_token.is_cancelled() {
+            break;
+        }
+
         let entries = crate::db::run_blocking(db, |conn| {
             Ok(models::next_crawl_entries(conn, 10)?)
         }).await?;
@@ -76,6 +81,10 @@ pub async fn run(
         }
 
         for entry in entries {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
             if visited.contains(&entry.url) {
                 let entry_id = entry.id;
                 crate::db::run_blocking(db, move |conn| {
@@ -115,19 +124,25 @@ pub async fn run(
                 entry.url
             ));
 
-            let dir_entries = match fetch_directory(&client, &limiter, &entry.url, &config.server.base_url).await {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("Failed to fetch {}: {e}", entry.url);
-                    let entry_id = entry.id;
-                    crate::db::run_blocking(db, move |conn| {
-                        conn.execute(
-                            "UPDATE crawl_queue SET status='error' WHERE id=?1",
-                            rusqlite::params![entry_id],
-                        )?;
-                        Ok(())
-                    }).await?;
-                    continue;
+            let dir_entries = tokio::select! {
+                res = fetch_directory(&client, &limiter, &entry.url, &config.server.base_url) => match res {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!("Failed to fetch {}: {e}", entry.url);
+                        let entry_id = entry.id;
+                        crate::db::run_blocking(db, move |conn| {
+                            conn.execute(
+                                "UPDATE crawl_queue SET status='error' WHERE id=?1",
+                                rusqlite::params![entry_id],
+                            )?;
+                            Ok(())
+                        }).await?;
+                        continue;
+                    }
+                },
+                _ = cancel_token.cancelled() => {
+                    info!("Crawl interrupted by cancellation during fetch.");
+                    break;
                 }
             };
 
