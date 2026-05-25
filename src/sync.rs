@@ -25,7 +25,9 @@ pub async fn run(
         config.concurrency.delay_between_requests_ms = delay;
     }
     if !opts.extensions.is_empty() {
-        config.sync.allowed_extensions = opts.extensions.clone();
+        config.sync.allowed_extensions = opts.extensions.iter()
+            .map(|ext| ext.trim_start_matches('.').to_owned())
+            .collect();
     }
 
     // First run: open folder selector if no selections saved and no CLI include specified.

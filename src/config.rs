@@ -152,8 +152,15 @@ pub fn load(path: Option<&Path>) -> Result<Config> {
 
     let raw = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config from {}", config_path.display()))?;
-    let cfg: Config =
+    let mut cfg: Config =
         toml::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
+    
+    for ext in &mut cfg.sync.allowed_extensions {
+        if ext.starts_with('.') {
+            *ext = ext.trim_start_matches('.').to_owned();
+        }
+    }
+
     cfg.validate().context("validating configuration")?;
     tracing::debug!("Loaded config from {}", config_path.display());
     Ok(cfg)
