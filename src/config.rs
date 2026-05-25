@@ -154,6 +154,7 @@ pub fn load(path: Option<&Path>) -> Result<Config> {
         .with_context(|| format!("reading config from {}", config_path.display()))?;
     let cfg: Config =
         toml::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
+    cfg.validate().context("validating configuration")?;
     tracing::debug!("Loaded config from {}", config_path.display());
     Ok(cfg)
 }
@@ -177,5 +178,20 @@ impl Default for Config {
             rate_limit: Default::default(),
             sync: Default::default(),
         }
+    }
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<()> {
+        if self.concurrency.max_parallel_downloads < 1 {
+            anyhow::bail!("concurrency.max_parallel_downloads must be >= 1");
+        }
+        if self.rate_limit.backoff_multiplier < 1.0 {
+            anyhow::bail!("rate_limit.backoff_multiplier must be >= 1.0");
+        }
+        if let Err(e) = reqwest::Url::parse(&self.server.base_url) {
+            anyhow::bail!("server.base_url is not a valid URL: {e}");
+        }
+        Ok(())
     }
 }
