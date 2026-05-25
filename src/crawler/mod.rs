@@ -404,7 +404,13 @@ fn parse_h5ai_response(
             continue;
         }
 
-        let url = format!("{}/{}", base_url.trim_end_matches('/'), href.trim_start_matches('/'));
+        let url = match reqwest::Url::parse(base_url) {
+            Ok(base) => match base.join(href) {
+                Ok(joined) => joined.to_string(),
+                Err(_) => format!("{}/{}", base_url.trim_end_matches('/'), href.trim_start_matches('/')),
+            },
+            Err(_) => format!("{}/{}", base_url.trim_end_matches('/'), href.trim_start_matches('/')),
+        };
 
         // h5ai provides timestamps in milliseconds since epoch.
         let last_modified = item
