@@ -5,7 +5,10 @@ use anyhow::Result;
 use chrono::DateTime;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
+use futures::stream::StreamExt;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -67,6 +70,8 @@ pub async fn run(
     let mut visited: HashSet<String> = HashSet::new();
     let mut files_found: u64 = 0;
 
+    let sem = Arc::new(Semaphore::new(4));
+
     loop {
         if cancel_token.is_cancelled() {
             break;
@@ -79,6 +84,8 @@ pub async fn run(
         if entries.is_empty() {
             break;
         }
+
+        let mut futures = futures::stream::FuturesUnordered::new();
 
         for entry in entries {
             if cancel_token.is_cancelled() {
@@ -118,80 +125,108 @@ pub async fn run(
                 continue;
             }
 
+            let sem = sem.clone();
+            let client = client.clone();
+            let limiter = limiter.clone();
+            let url = entry.url.clone();
+            let base_url = config.server.base_url.clone();
+            let entry_id = entry.id;
+            let entry_depth = entry.depth;
+            let cancel_token = cancel_token.clone();
+
+            futures.push(tokio::spawn(async move {
+                let _permit = tokio::select! {
+                    p = sem.acquire_owned() => match p {
+                        Ok(permit) => permit,
+                        Err(e) => {
+                            warn!("Semaphore acquire failed: {e}");
+                            return None;
+                        }
+                    },
+                    _ = cancel_token.cancelled() => return None,
+                };
+                
+                let res = tokio::select! {
+                    res = fetch_directory(&client, &limiter, &url, &base_url) => res,
+                    _ = cancel_token.cancelled() => return None,
+                };
+                
+                Some((entry_id, entry_depth, url, res))
+            }));
+        }
+
+        while let Some(res) = futures.next().await {
+            let (entry_id, entry_depth, url, fetch_res) = match res {
+                Ok(Some(val)) => val,
+                _ => continue, // either joined thread panicked or it was cancelled
+            };
+
             spinner.set_message(format!(
                 "Crawling ({} files found): {}",
                 files_found,
-                entry.url
+                url
             ));
 
-            let dir_entries = tokio::select! {
-                res = fetch_directory(&client, &limiter, &entry.url, &config.server.base_url) => match res {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!("Failed to fetch {}: {e}", entry.url);
-                        let entry_id = entry.id;
-                        crate::db::run_blocking(db, move |conn| {
-                            conn.execute(
-                                "UPDATE crawl_queue SET status='error' WHERE id=?1",
-                                rusqlite::params![entry_id],
-                            )?;
-                            Ok(())
-                        }).await?;
-                        continue;
+            match fetch_res {
+                Ok(dir_entries) => {
+                    if dir_entries.is_empty() {
+                        warn!("No entries found at {} — server may require JavaScript or block crawlers", url);
                     }
-                },
-                _ = cancel_token.cancelled() => {
-                    info!("Crawl interrupted by cancellation during fetch.");
-                    break;
-                }
-            };
 
-            if dir_entries.is_empty() {
-                warn!("No entries found at {} — server may require JavaScript or block crawlers", entry.url);
-            }
+                    let allowed_extensions = config.sync.allowed_extensions.clone();
+                    let base_url = config.server.base_url.clone();
+                    let db_clone = db.clone();
+                    let dir_entries_clone = dir_entries.clone();
 
-            let allowed_extensions = config.sync.allowed_extensions.clone();
-            let base_url = config.server.base_url.clone();
-            let entry_depth = entry.depth;
-            let entry_id = entry.id;
-            let dir_entries_clone = dir_entries.clone();
+                    let added_files = crate::db::run_blocking(&db_clone, move |conn| {
+                        let tx = conn.unchecked_transaction()?;
+                        let mut added = 0;
+                        for de in &dir_entries_clone {
+                            if de.is_dir {
+                                models::enqueue_crawl(&tx, &de.url, entry_depth + 1)?;
+                            } else {
+                                // Apply extension filter
+                                if !allowed_extensions.is_empty() {
+                                    let ext = std::path::Path::new(&de.url)
+                                        .extension()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("");
+                                    
+                                    if !allowed_extensions.iter().any(|allowed| allowed.eq_ignore_ascii_case(ext)) {
+                                        debug!("Skipping file (extension not allowed): {}", de.url);
+                                        continue;
+                                    }
+                                }
 
-            let added_files = crate::db::run_blocking(db, move |conn| {
-                let tx = conn.unchecked_transaction()?;
-                let mut added = 0;
-                for de in &dir_entries_clone {
-                    if de.is_dir {
-                        models::enqueue_crawl(&tx, &de.url, entry_depth + 1)?;
-                    } else {
-                        // Apply extension filter
-                        if !allowed_extensions.is_empty() {
-                            let ext = std::path::Path::new(&de.url)
-                                .extension()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("");
-                            
-                            if !allowed_extensions.iter().any(|allowed| allowed.eq_ignore_ascii_case(ext)) {
-                                debug!("Skipping file (extension not allowed): {}", de.url);
-                                continue;
+                                let remote_path = url_to_path(&de.url, &base_url);
+                                models::upsert_file(
+                                    &tx,
+                                    &de.url,
+                                    &remote_path,
+                                    de.last_modified.as_deref(),
+                                    de.size_bytes,
+                                )?;
+                                added += 1;
                             }
                         }
-
-                        let remote_path = url_to_path(&de.url, &base_url);
-                        models::upsert_file(
-                            &tx,
-                            &de.url,
-                            &remote_path,
-                            de.last_modified.as_deref(),
-                            de.size_bytes,
-                        )?;
-                        added += 1;
-                    }
+                        models::mark_crawl_done(&tx, entry_id)?;
+                        tx.commit()?;
+                        Ok(added)
+                    }).await?;
+                    files_found += added_files;
                 }
-                models::mark_crawl_done(&tx, entry_id)?;
-                tx.commit()?;
-                Ok(added)
-            }).await?;
-            files_found += added_files;
+                Err(e) => {
+                    warn!("Failed to fetch {url}: {e}");
+                    let db_clone = db.clone();
+                    crate::db::run_blocking(&db_clone, move |conn| {
+                        conn.execute(
+                            "UPDATE crawl_queue SET status='error' WHERE id=?1",
+                            rusqlite::params![entry_id],
+                        )?;
+                        Ok(())
+                    }).await?;
+                }
+            }
         }
     }
 
