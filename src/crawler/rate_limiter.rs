@@ -26,6 +26,9 @@ pub fn build_client(user_agent: &str) -> Result<Client> {
         .user_agent(user_agent)
         .connect_timeout(Duration::from_secs(30))
         .tcp_keepalive(Duration::from_secs(60))
+        // Set a long overall timeout of 1 hour to prevent hung connections
+        // while still supporting very large file transfers.
+        .timeout(Duration::from_secs(3600))
         .build()?;
     Ok(client)
 }
