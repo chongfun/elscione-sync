@@ -22,7 +22,13 @@ pub fn open(_config: &Config) -> Result<Db> {
         .with_context(|| format!("opening database at {}", db_path.display()))?;
 
     // Enable WAL for better concurrent read performance.
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA busy_timeout=5000;
+         PRAGMA synchronous=NORMAL;
+         PRAGMA cache_size=-8000;
+         PRAGMA foreign_keys=ON;"
+    )?;
 
     run_migrations(&mut conn)?;
 
