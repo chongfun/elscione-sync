@@ -36,20 +36,22 @@ pub async fn run(
 
     // Seed crawl queue if empty, and reset any previous errors.
     {
-        let conn = db.lock().unwrap();
-        
-        if !models::has_pending_crawl(&conn)? {
-            // If no pending work, clear the queue (done/error entries) to allow a fresh discovery.
-            models::clear_crawl_queue(&conn)?;
-            models::enqueue_crawl(&conn, &config.server.base_url, 0)?;
-            info!("Crawl queue was empty; starting fresh discovery from {}", config.server.base_url);
-        } else {
-            let reset_count = models::reset_crawl_errors(&conn)?;
-            if reset_count > 0 {
-                info!("Reset {} failed crawl entries to pending.", reset_count);
+        let base_url = config.server.base_url.clone();
+        crate::db::run_blocking(db, move |conn| {
+            if !models::has_pending_crawl(conn)? {
+                // If no pending work, clear the queue (done/error entries) to allow a fresh discovery.
+                models::clear_crawl_queue(conn)?;
+                models::enqueue_crawl(conn, &base_url, 0)?;
+                info!("Crawl queue was empty; starting fresh discovery from {}", base_url);
+            } else {
+                let reset_count = models::reset_crawl_errors(conn)?;
+                if reset_count > 0 {
+                    info!("Reset {} failed crawl entries to pending.", reset_count);
+                }
+                info!("Resuming crawl from existing queue entries.");
             }
-            info!("Resuming crawl from existing queue entries.");
-        }
+            Ok(())
+        }).await?;
     }
 
     // Spinner to show live crawl activity.
@@ -65,10 +67,9 @@ pub async fn run(
     let mut files_found: u64 = 0;
 
     loop {
-        let entries = {
-            let conn = db.lock().unwrap();
-            models::next_crawl_entries(&conn, 10)?
-        };
+        let entries = crate::db::run_blocking(db, |conn| {
+            Ok(models::next_crawl_entries(conn, 10)?)
+        }).await?;
 
         if entries.is_empty() {
             break;
@@ -76,8 +77,10 @@ pub async fn run(
 
         for entry in entries {
             if visited.contains(&entry.url) {
-                let conn = db.lock().unwrap();
-                models::mark_crawl_done(&conn, entry.id)?;
+                let entry_id = entry.id;
+                crate::db::run_blocking(db, move |conn| {
+                    Ok(models::mark_crawl_done(conn, entry_id)?)
+                }).await?;
                 continue;
             }
             visited.insert(entry.url.clone());
@@ -87,8 +90,10 @@ pub async fn run(
                 let name = last_segment(&entry.url);
                 if !include_folders.iter().any(|f| name.contains(f.as_str())) {
                     debug!("Skipping folder (not in selection): {} (name: {})", entry.url, name);
-                    let conn = db.lock().unwrap();
-                    models::mark_crawl_done(&conn, entry.id)?;
+                    let entry_id = entry.id;
+                    crate::db::run_blocking(db, move |conn| {
+                        Ok(models::mark_crawl_done(conn, entry_id)?)
+                    }).await?;
                     continue;
                 } else {
                     debug!("Entering selected folder: {}", entry.url);
@@ -97,8 +102,10 @@ pub async fn run(
 
             if is_excluded(&entry.url, &exclude_patterns) {
                 debug!("Excluded by pattern: {}", entry.url);
-                let conn = db.lock().unwrap();
-                models::mark_crawl_done(&conn, entry.id)?;
+                let entry_id = entry.id;
+                crate::db::run_blocking(db, move |conn| {
+                    Ok(models::mark_crawl_done(conn, entry_id)?)
+                }).await?;
                 continue;
             }
 
@@ -112,11 +119,14 @@ pub async fn run(
                 Ok(e) => e,
                 Err(e) => {
                     warn!("Failed to fetch {}: {e}", entry.url);
-                    let conn = db.lock().unwrap();
-                    conn.execute(
-                        "UPDATE crawl_queue SET status='error' WHERE id=?1",
-                        rusqlite::params![entry.id],
-                    )?;
+                    let entry_id = entry.id;
+                    crate::db::run_blocking(db, move |conn| {
+                        conn.execute(
+                            "UPDATE crawl_queue SET status='error' WHERE id=?1",
+                            rusqlite::params![entry_id],
+                        )?;
+                        Ok(())
+                    }).await?;
                     continue;
                 }
             };
@@ -125,27 +135,33 @@ pub async fn run(
                 warn!("No entries found at {} — server may require JavaScript or block crawlers", entry.url);
             }
 
-            {
-                let conn = db.lock().unwrap();
+            let allowed_extensions = config.sync.allowed_extensions.clone();
+            let base_url = config.server.base_url.clone();
+            let entry_depth = entry.depth;
+            let entry_id = entry.id;
+            let dir_entries_clone = dir_entries.clone();
+
+            let added_files = crate::db::run_blocking(db, move |conn| {
                 let tx = conn.unchecked_transaction()?;
-                for de in &dir_entries {
+                let mut added = 0;
+                for de in &dir_entries_clone {
                     if de.is_dir {
-                        models::enqueue_crawl(&tx, &de.url, entry.depth + 1)?;
+                        models::enqueue_crawl(&tx, &de.url, entry_depth + 1)?;
                     } else {
                         // Apply extension filter
-                        if !config.sync.allowed_extensions.is_empty() {
+                        if !allowed_extensions.is_empty() {
                             let ext = std::path::Path::new(&de.url)
                                 .extension()
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("");
                             
-                            if !config.sync.allowed_extensions.iter().any(|allowed| allowed.eq_ignore_ascii_case(ext)) {
+                            if !allowed_extensions.iter().any(|allowed| allowed.eq_ignore_ascii_case(ext)) {
                                 debug!("Skipping file (extension not allowed): {}", de.url);
                                 continue;
                             }
                         }
 
-                        let remote_path = url_to_path(&de.url, &config.server.base_url);
+                        let remote_path = url_to_path(&de.url, &base_url);
                         models::upsert_file(
                             &tx,
                             &de.url,
@@ -153,12 +169,14 @@ pub async fn run(
                             de.last_modified.as_deref(),
                             de.size_bytes,
                         )?;
-                        files_found += 1;
+                        added += 1;
                     }
                 }
-                models::mark_crawl_done(&tx, entry.id)?;
+                models::mark_crawl_done(&tx, entry_id)?;
                 tx.commit()?;
-            }
+                Ok(added)
+            }).await?;
+            files_found += added_files;
         }
     }
 

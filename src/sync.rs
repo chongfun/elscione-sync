@@ -24,10 +24,9 @@ pub async fn run(mut config: Config, db: Db, opts: SyncOpts) -> Result<()> {
     }
 
     // First run: open folder selector if no selections saved and no CLI include specified.
-    let has_selections = {
-        let conn = db.lock().unwrap();
-        models::has_any_selected_folders(&conn)?
-    };
+    let has_selections = crate::db::run_blocking(&db, |conn| {
+        Ok(models::has_any_selected_folders(conn)?)
+    }).await?;
 
     if !has_selections && opts.include.is_empty() {
         info!("No folder selections found — launching interactive selector.");
@@ -38,12 +37,13 @@ pub async fn run(mut config: Config, db: Db, opts: SyncOpts) -> Result<()> {
     let include_folders: Vec<String> = if !opts.include.is_empty() {
         opts.include.clone()
     } else {
-        let conn = db.lock().unwrap();
-        models::load_selected_folders(&conn)?
-            .into_iter()
-            .filter(|f| f.enabled)
-            .map(|f| f.path)
-            .collect()
+        crate::db::run_blocking(&db, |conn| {
+            Ok(models::load_selected_folders(conn)?)
+        }).await?
+        .into_iter()
+        .filter(|f| f.enabled)
+        .map(|f| f.path)
+        .collect()
     };
 
     if include_folders.is_empty() && config.sync.include_folders.is_empty() {
@@ -53,8 +53,9 @@ pub async fn run(mut config: Config, db: Db, opts: SyncOpts) -> Result<()> {
 
     // Reset any stale 'downloading' records from a previous interrupted run.
     {
-        let conn = db.lock().unwrap();
-        let reset = models::reset_interrupted(&conn, false)?;
+        let reset = crate::db::run_blocking(&db, |conn| {
+            Ok(models::reset_interrupted(conn, false)?)
+        }).await?;
         if reset > 0 {
             info!("Reset {reset} interrupted downloads to 'pending'.");
         }
@@ -78,15 +79,17 @@ pub async fn run(mut config: Config, db: Db, opts: SyncOpts) -> Result<()> {
     info!("Starting download phase …");
     downloader::run(&config, &db, opts.dry_run).await?;
 
-    print_status(&db)?;
+    print_status(&db).await?;
     Ok(())
 }
 
 /// Print a summary table of file counts by status.
-pub fn print_status(db: &Db) -> Result<()> {
-    let conn = db.lock().unwrap();
-    let counts = models::status_counts(&conn)?;
-    let pending_bytes = models::pending_bytes(&conn)?;
+pub async fn print_status(db: &Db) -> Result<()> {
+    let (counts, pending_bytes) = crate::db::run_blocking(db, |conn| {
+        let counts = models::status_counts(conn)?;
+        let pending_bytes = models::pending_bytes(conn)?;
+        Ok((counts, pending_bytes))
+    }).await?;
 
     println!("\n─── elscione-sync status ───────────────────");
     for (status, count) in &counts {
@@ -100,17 +103,21 @@ pub fn print_status(db: &Db) -> Result<()> {
 }
 
 /// Reset interrupted/error records back to 'pending'.
-pub fn reset(db: &Db, errors_only: bool) -> Result<()> {
-    let conn = db.lock().unwrap();
-    let n = models::reset_interrupted(&conn, errors_only)?;
+pub async fn reset(db: &Db, errors_only: bool) -> Result<()> {
+    let n = crate::db::run_blocking(db, move |conn| {
+        Ok(models::reset_interrupted(conn, errors_only)?)
+    }).await?;
     println!("Reset {n} file(s) to 'pending'.");
     Ok(())
 }
 
 /// List files with optional filters.
-pub fn list(db: &Db, filter: Option<&str>, status: Option<&str>) -> Result<()> {
-    let conn = db.lock().unwrap();
-    let files = models::list_files(&conn, filter, status)?;
+pub async fn list(db: &Db, filter: Option<&str>, status: Option<&str>) -> Result<()> {
+    let filter = filter.map(|s| s.to_owned());
+    let status = status.map(|s| s.to_owned());
+    let files = crate::db::run_blocking(db, move |conn| {
+        Ok(models::list_files(conn, filter.as_deref(), status.as_deref())?)
+    }).await?;
     println!("{:<10} {:<12} {:<10} {}", "ID", "STATUS", "SIZE", "PATH");
     for f in &files {
         let size = f
@@ -122,3 +129,5 @@ pub fn list(db: &Db, filter: Option<&str>, status: Option<&str>) -> Result<()> {
     println!("({} result(s))", files.len());
     Ok(())
 }
+
+

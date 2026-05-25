@@ -45,13 +45,13 @@ async fn main() -> Result<()> {
             tui::run_folder_selector(&config, &db).await?;
         }
         Some(Commands::Status) => {
-            sync::print_status(&db)?;
+            sync::print_status(&db).await?;
         }
         Some(Commands::Reset { errors_only }) => {
-            sync::reset(&db, *errors_only)?;
+            sync::reset(&db, *errors_only).await?;
         }
         Some(Commands::List { filter, status }) => {
-            sync::list(&db, filter.as_deref(), status.as_deref())?;
+            sync::list(&db, filter.as_deref(), status.as_deref()).await?;
         }
         Some(Commands::EditConfig) => {
             let path = cli.config.clone().unwrap_or_else(|| config::default_config_path());

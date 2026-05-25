@@ -17,24 +17,29 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
     // 1. Initial cleanup/sync: Filter and mark files that don't match allowed extensions as skipped
     // This ensures our "Download queue" log and progress bars are accurate.
     if !config.sync.allowed_extensions.is_empty() {
-        let conn = db.lock().unwrap();
-        let pending = models::files_by_status(&conn, "pending")?;
-        for record in pending {
-            let ext = std::path::Path::new(&record.remote_url)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            if !config.sync.allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(ext)) {
-                let _ = models::set_file_status(&conn, record.id, "skipped", None, None);
+        let allowed_extensions = config.sync.allowed_extensions.clone();
+        crate::db::run_blocking(db, move |conn| {
+            let pending = models::files_by_status(conn, "pending")?;
+            for record in pending {
+                let ext = std::path::Path::new(&record.remote_url)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                if !allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(ext)) {
+                    let _ = models::set_file_status(conn, record.id, "skipped", None, None);
+                }
             }
-        }
+            Ok(())
+        }).await?;
     }
 
     // 2. Print accurate summary
     {
-        let conn = db.lock().unwrap();
-        let pending_bytes = models::pending_bytes(&conn)?;
-        let pending_count = conn.query_row("SELECT COUNT(*) FROM files WHERE status='pending'", [], |r| r.get::<_, i64>(0))?;
+        let (pending_count, pending_bytes) = crate::db::run_blocking(db, |conn| {
+            let pending_bytes = models::pending_bytes(conn)?;
+            let pending_count = conn.query_row("SELECT COUNT(*) FROM files WHERE status='pending'", [], |r| r.get::<_, i64>(0))?;
+            Ok((pending_count, pending_bytes))
+        }).await?;
         info!(
             "Download queue: {} file(s) / {}",
             pending_count,
@@ -49,37 +54,45 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
     let output_dir = config.output.dir.clone();
 
     loop {
-        let mut pending = {
-            let conn = db.lock().unwrap();
-            models::files_by_status(&conn, "pending")?
-        };
+        let mut pending = crate::db::run_blocking(db, |conn| {
+            Ok(models::files_by_status(conn, "pending")?)
+        }).await?;
 
         if !config.sync.allowed_extensions.is_empty() {
-            let mut filtered = Vec::new();
-            for record in pending {
-                let ext = std::path::Path::new(&record.remote_url)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                
-                if config.sync.allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(ext)) {
-                    filtered.push(record);
-                } else {
-                    debug!("Skipping file during download (extension not allowed): {}", record.remote_url);
-                    let conn = db.lock().unwrap();
-                    let _ = models::set_file_status(&conn, record.id, "skipped", None, None);
+            let allowed_extensions = config.sync.allowed_extensions.clone();
+            let pending_clone = pending.clone();
+            let (filtered, to_skip) = crate::db::run_blocking(db, move |conn| {
+                let mut filtered = Vec::new();
+                let mut to_skip = Vec::new();
+                for record in pending_clone {
+                    let ext = std::path::Path::new(&record.remote_url)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    
+                    if allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(ext)) {
+                        filtered.push(record);
+                    } else {
+                        to_skip.push(record.id);
+                    }
                 }
-            }
+                for id in &to_skip {
+                    let _ = models::set_file_status(conn, *id, "skipped", None, None);
+                }
+                Ok((filtered, to_skip))
+            }).await?;
             pending = filtered;
+            for id in to_skip {
+                debug!("Skipping file during download (extension not allowed) ID: {}", id);
+            }
         }
 
         if pending.is_empty() {
             // Check if there are any pending files left in the DB. If we skipped the whole
             // batch, we should fetch the next batch. If there are truly no pending files, break.
-            let count = {
-                let conn = db.lock().unwrap();
-                conn.query_row("SELECT COUNT(*) FROM files WHERE status='pending'", [], |r| r.get::<_, i64>(0)).unwrap_or(0)
-            };
+            let count = crate::db::run_blocking(db, |conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM files WHERE status='pending'", [], |r| r.get::<_, i64>(0)).unwrap_or(0))
+            }).await?;
             if count == 0 {
                 break;
             } else {
@@ -110,16 +123,20 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
         for record in pending {
             if dry_run {
                 info!("[DRY RUN] Would download: {}", record.remote_path);
-                let conn = db.lock().unwrap();
-                models::set_file_status(&conn, record.id, "skipped", None, None)?;
+                let record_id = record.id;
+                crate::db::run_blocking(db, move |conn| {
+                    Ok(models::set_file_status(conn, record_id, "skipped", None, None)?)
+                }).await?;
                 overall.inc(1);
                 continue;
             }
 
             // Mark as downloading.
             {
-                let conn = db.lock().unwrap();
-                models::set_file_status(&conn, record.id, "downloading", None, None)?;
+                let record_id = record.id;
+                crate::db::run_blocking(db, move |conn| {
+                    Ok(models::set_file_status(conn, record_id, "downloading", None, None)?)
+                }).await?;
             }
 
             let permit = semaphore.clone().acquire_owned().await?;
@@ -141,6 +158,8 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                 };
 
                 // Check if file already exists with matching size (skip if not redownload_on_mismatch).
+                let mut already_exists_and_done = false;
+                let mut already_exists_and_skipped = false;
                 if dest_path.exists() {
                     if let (Some(expected_size), Ok(meta)) =
                         (record.size_bytes, std::fs::metadata(&dest_path))
@@ -148,21 +167,29 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                         let local_size = meta.len() as i64;
                         if local_size == expected_size {
                             info!("Already complete (size match): {}", dest_path.display());
-                            let conn = db.lock().unwrap();
-                            let _ = models::set_file_status(&conn, record.id, "done", None, None);
+                            let record_id = record.id;
+                            let _ = crate::db::run_blocking(&db, move |conn| {
+                                Ok(models::set_file_status(conn, record_id, "done", None, None)?)
+                            }).await;
                             overall.inc(1);
-                            return;
+                            already_exists_and_done = true;
                         } else if !redownload_on_mismatch {
                             warn!(
                                 "Size mismatch but redownload_on_size_mismatch=false, skipping: {}",
                                 dest_path.display()
                             );
-                            let conn = db.lock().unwrap();
-                            let _ = models::set_file_status(&conn, record.id, "skipped", None, None);
+                            let record_id = record.id;
+                            let _ = crate::db::run_blocking(&db, move |conn| {
+                                Ok(models::set_file_status(conn, record_id, "skipped", None, None)?)
+                            }).await;
                             overall.inc(1);
-                            return;
+                            already_exists_and_skipped = true;
                         }
                     }
+                }
+
+                if already_exists_and_done || already_exists_and_skipped {
+                    return;
                 }
 
                 // Per-file progress bar.
@@ -215,21 +242,27 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
                             file_name, size_str
                         ));
 
-                        let conn = db.lock().unwrap();
-                        let _ = models::set_file_status(
-                            &conn,
-                            record.id,
-                            "done",
-                            None,
-                            Some(&checksum),
-                        );
+                        let record_id = record.id;
+                        let checksum_clone = checksum.clone();
+                        let _ = crate::db::run_blocking(&db, move |conn| {
+                            Ok(models::set_file_status(
+                                conn,
+                                record_id,
+                                "done",
+                                None,
+                                Some(&checksum_clone),
+                            )?)
+                        }).await;
                     }
                     Err(e) => {
                         pb.finish_and_clear();
                         multi.remove(&pb);
                         let _ = multi.println(format!("  ✗ {}: {}", record.remote_path, e));
-                        let conn = db.lock().unwrap();
-                        let _ = models::record_error(&conn, record.id, &e.to_string());
+                        let record_id = record.id;
+                        let err_msg = e.to_string();
+                        let _ = crate::db::run_blocking(&db, move |conn| {
+                            Ok(models::record_error(conn, record_id, &err_msg)?)
+                        }).await;
                     }
                 }
 
@@ -246,10 +279,9 @@ pub async fn run(config: &Config, db: &Db, dry_run: bool) -> Result<()> {
         overall.finish_and_clear();
 
         // Check if any new pending files appeared during this batch (from a concurrent crawl).
-        let remaining = {
-            let conn = db.lock().unwrap();
-            models::files_by_status(&conn, "pending")?.len()
-        };
+        let remaining = crate::db::run_blocking(db, |conn| {
+            Ok(models::files_by_status(conn, "pending")?.len())
+        }).await?;
         if remaining == 0 {
             break;
         }

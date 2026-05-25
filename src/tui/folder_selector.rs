@@ -243,14 +243,13 @@ pub async fn run(config: &Config, db: &Db) -> Result<()> {
     }
 
     // Load any existing selections from DB.
-    let existing_selections: Vec<String> = {
-        let conn = db.lock().unwrap();
-        models::load_selected_folders(&conn)?
-            .into_iter()
-            .filter(|f| f.enabled)
-            .map(|f| f.path)
-            .collect()
-    };
+    let existing_selections: Vec<String> = crate::db::run_blocking(db, |conn| {
+        Ok(models::load_selected_folders(conn)?)
+    }).await?
+    .into_iter()
+    .filter(|f| f.enabled)
+    .map(|f| f.path)
+    .collect();
 
     let nodes: Vec<FolderNode> = nodes
         .into_iter()
@@ -331,10 +330,12 @@ pub async fn run(config: &Config, db: &Db) -> Result<()> {
                 })
                 .collect();
 
-            let conn = db.lock().unwrap();
-            models::save_selected_folders(&conn, &folders)?;
-
             let selected_count = folders.iter().filter(|f| f.enabled).count();
+
+            crate::db::run_blocking(db, move |conn| {
+                Ok(models::save_selected_folders(conn, &folders)?)
+            }).await?;
+
             println!(
                 "Saved {} folder selection{}.",
                 selected_count,

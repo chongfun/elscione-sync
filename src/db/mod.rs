@@ -45,3 +45,21 @@ fn run_migrations(conn: &mut Connection) -> Result<()> {
         .context("running database migrations")?;
     Ok(())
 }
+
+/// Run a database operation on a blocking thread pool, returning the result.
+pub async fn run_blocking<F, R>(db: &Db, f: F) -> Result<R>
+where
+    F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    let db = db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        f(&conn)
+    })
+    .await
+    .context("database task panicked")?
+}
+
+
+
