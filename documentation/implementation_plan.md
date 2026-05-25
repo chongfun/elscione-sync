@@ -41,6 +41,7 @@ src/
 ├── sync.rs                    # Sync orchestration state machine
 ├── db/
 │   ├── mod.rs                 # DB connection setup + migrations
+│   ├── schema.rs              # Database schema definitions
 │   └── models.rs              # All SQL queries (upsert, status transitions, counts)
 ├── crawler/
 │   ├── mod.rs                 # BFS crawl orchestration via h5ai JSON API
@@ -54,7 +55,7 @@ src/
     └── folder_selector.rs     # Interactive checkbox folder selector widget
 ```
 
-**Note:** `db/schema.rs` was not implemented as a separate file — migrations are embedded directly in `db/mod.rs`.
+**Note:** Database schema is defined in `db/schema.rs`, and migrations are run in `db/mod.rs`.
 
 ---
 
@@ -151,6 +152,7 @@ Persists user's interactive TUI folder selections.
 |---|---|---|
 | `path` | TEXT PK | e.g. `/Officially Translated Light Novels/` |
 | `enabled` | INTEGER | 1 = selected, 0 = deselected |
+| `size_bytes` | INTEGER | Total size in bytes of the folder contents (if known) |
 
 ---
 
