@@ -36,16 +36,35 @@ pub async fn download_file(
         p
     };
 
-    // Remove stale .part file if present.
+    let mut resumed_bytes = 0;
+    let mut request = client.get(url);
+
     if part_path.exists() {
-        fs::remove_file(&part_path).await?;
+        if let Ok(meta) = fs::metadata(&part_path).await {
+            let len = meta.len();
+            if len > 0 {
+                resumed_bytes = len;
+                request = request.header("Range", format!("bytes={}-", len));
+            }
+        }
     }
 
-    let response = client
-        .get(url)
+    let mut response = request
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?;
+
+    // Handle 416 Range Not Satisfiable by truncating and retrying from 0
+    if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        resumed_bytes = 0;
+        if part_path.exists() {
+            let _ = fs::remove_file(&part_path).await;
+        }
+        response = client.get(url)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("GET {url} (retry after 416): {e}"))?;
+    }
 
     if !response.status().is_success() {
         return Err(anyhow::anyhow!(
@@ -54,8 +73,40 @@ pub async fn download_file(
         ));
     }
 
-    let mut file = File::create(&part_path).await?;
     let mut hasher = Sha256::new();
+    let mut file = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT && resumed_bytes > 0 {
+        // Read existing bytes from the part file to update the hasher.
+        let mut file_read = File::open(&part_path).await?;
+        let mut buffer = vec![0u8; 65536];
+        loop {
+            let bytes_read = tokio::io::AsyncReadExt::read(&mut file_read, &mut buffer).await?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        drop(file_read);
+
+        if let Some(p) = pb {
+            p.inc(resumed_bytes);
+        }
+        if let (Some(o), Some(rem)) = (overall, &remaining_bytes) {
+            let current_rem = rem.fetch_sub(resumed_bytes, std::sync::atomic::Ordering::Relaxed).saturating_sub(resumed_bytes);
+            o.set_message(format!("{} remaining", bytesize::ByteSize(current_rem)));
+        }
+
+        fs::OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(&part_path)
+            .await?
+    } else {
+        if part_path.exists() {
+            let _ = fs::remove_file(&part_path).await;
+        }
+        File::create(&part_path).await?
+    };
+
     let mut stream = response.bytes_stream();
 
     use futures::StreamExt;
