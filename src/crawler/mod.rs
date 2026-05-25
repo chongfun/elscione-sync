@@ -127,9 +127,10 @@ pub async fn run(
 
             {
                 let conn = db.lock().unwrap();
+                let tx = conn.unchecked_transaction()?;
                 for de in &dir_entries {
                     if de.is_dir {
-                        models::enqueue_crawl(&conn, &de.url, entry.depth + 1)?;
+                        models::enqueue_crawl(&tx, &de.url, entry.depth + 1)?;
                     } else {
                         // Apply extension filter
                         if !config.sync.allowed_extensions.is_empty() {
@@ -146,7 +147,7 @@ pub async fn run(
 
                         let remote_path = url_to_path(&de.url, &config.server.base_url);
                         models::upsert_file(
-                            &conn,
+                            &tx,
                             &de.url,
                             &remote_path,
                             de.last_modified.as_deref(),
@@ -155,7 +156,8 @@ pub async fn run(
                         files_found += 1;
                     }
                 }
-                models::mark_crawl_done(&conn, entry.id)?;
+                models::mark_crawl_done(&tx, entry.id)?;
+                tx.commit()?;
             }
         }
     }

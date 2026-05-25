@@ -287,13 +287,17 @@ pub fn load_selected_folders(conn: &Connection) -> SqlResult<Vec<SelectedFolder>
 }
 
 pub fn save_selected_folders(conn: &Connection, folders: &[SelectedFolder]) -> SqlResult<()> {
-    conn.execute("DELETE FROM selected_folders", [])?;
-    for f in folders {
-        conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM selected_folders", [])?;
+    {
+        let mut stmt = tx.prepare_cached(
             "INSERT INTO selected_folders (path, enabled, size_bytes) VALUES (?1, ?2, ?3)",
-            params![f.path, f.enabled as i64, f.size_bytes],
         )?;
+        for f in folders {
+            stmt.execute(params![f.path, f.enabled as i64, f.size_bytes])?;
+        }
     }
+    tx.commit()?;
     Ok(())
 }
 
