@@ -135,12 +135,12 @@ pub fn set_file_status(
     if status == "done" {
         conn.execute(
             "UPDATE files SET status=?1, error_message=?2, checksum_sha256=?3,
-             completed_at=datetime('now') WHERE id=?4",
+             completed_at=datetime('now') WHERE id=?4 AND status != 'done'",
             params![status, error_message, checksum, id],
         )?;
     } else {
         conn.execute(
-            "UPDATE files SET status=?1, error_message=?2, checksum_sha256=?3 WHERE id=?4",
+            "UPDATE files SET status=?1, error_message=?2, checksum_sha256=?3 WHERE id=?4 AND status != 'done'",
             params![status, error_message, checksum, id],
         )?;
     }
@@ -150,7 +150,7 @@ pub fn set_file_status(
 /// Increment retry_count and set status to 'error'.
 pub fn record_error(conn: &Connection, id: i64, message: &str) -> SqlResult<()> {
     conn.execute(
-        "UPDATE files SET status='error', error_message=?1, retry_count=retry_count+1 WHERE id=?2",
+        "UPDATE files SET status='error', error_message=?1, retry_count=retry_count+1 WHERE id=?2 AND status != 'done'",
         params![message, id],
     )?;
     Ok(())
