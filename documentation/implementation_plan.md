@@ -203,7 +203,8 @@ Before downloading, any `pending` files in the DB that don't match `allowed_exte
 - Sets file `mtime` to match the server's `Last-Modified` via `filetime`.
 
 #### HTTP Client Configuration
-- `connect_timeout`: 30 seconds (connection establishment only; data transfer is unlimited).
+- `connect_timeout`: 30 seconds for connection establishment.
+- Overall request timeout: 1 hour.
 - `tcp_keepalive`: 60 seconds.
 - Decompression: gzip, brotli, deflate (enabled to prevent "stream error decoding response body").
 - Inter-request delay: configurable `delay_between_requests_ms`.
