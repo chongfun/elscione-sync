@@ -50,7 +50,7 @@ pub async fn run(
         );
     }
 
-    let client = build_client(&config.server.user_agent)?;
+    let client = build_client(&config.server.user_agent, config.server.cookie.as_deref())?;
     let limiter = RateLimiter::new(config.concurrency.delay_between_requests_ms);
     let semaphore = Arc::new(Semaphore::new(config.concurrency.max_parallel_downloads));
     let multi = MultiProgress::new();

@@ -96,7 +96,7 @@ impl App {
 /// Fetch top-level folders from the server and build FolderNode list.
 /// Uses the h5ai JSON API directly (the server is a JS-rendered h5ai instance).
 async fn fetch_folders(config: &Config) -> Result<Vec<FolderNode>> {
-    let client = build_client(&config.server.user_agent)?;
+    let client = build_client(&config.server.user_agent, config.server.cookie.as_deref())?;
     info!("Fetching folder list from {}", config.server.base_url);
 
     // Try h5ai JSON API — this server is confirmed to run h5ai.

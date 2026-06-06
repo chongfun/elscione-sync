@@ -23,6 +23,8 @@ pub struct Config {
 pub struct ServerConfig {
     pub base_url: String,
     pub user_agent: String,
+    #[serde(default)]
+    pub cookie: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -30,6 +32,7 @@ impl Default for ServerConfig {
         Self {
             base_url: "https://server.elscione.com/".to_owned(),
             user_agent: format!("elscione-sync/{} (personal mirror)", env!("CARGO_PKG_VERSION")),
+            cookie: None,
         }
     }
 }

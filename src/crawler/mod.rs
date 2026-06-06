@@ -23,7 +23,7 @@ pub async fn run(
     exclude_overrides: &[String],
     cancel_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let client = build_client(&config.server.user_agent)?;
+    let client = build_client(&config.server.user_agent, config.server.cookie.as_deref())?;
     let limiter = RateLimiter::new(config.concurrency.crawl_delay_ms);
 
     let include_folders: Vec<String> = if !include_overrides.is_empty() {

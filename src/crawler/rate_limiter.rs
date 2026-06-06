@@ -21,14 +21,23 @@ impl RateLimiter {
 }
 
 /// Build a reqwest Client with the configured User-Agent and sensible timeouts.
-pub fn build_client(user_agent: &str) -> Result<Client> {
-    let client = Client::builder()
+pub fn build_client(user_agent: &str, cookie: Option<&str>) -> Result<Client> {
+    let mut builder = Client::builder()
         .user_agent(user_agent)
         .connect_timeout(Duration::from_secs(30))
         .tcp_keepalive(Duration::from_secs(60))
         // Set a long overall timeout of 1 hour to prevent hung connections
         // while still supporting very large file transfers.
-        .timeout(Duration::from_secs(3600))
-        .build()?;
+        .timeout(Duration::from_secs(3600));
+
+    if let Some(cookie_str) = cookie {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let mut val = reqwest::header::HeaderValue::from_str(cookie_str)?;
+        val.set_sensitive(true);
+        headers.insert(reqwest::header::COOKIE, val);
+        builder = builder.default_headers(headers);
+    }
+
+    let client = builder.build()?;
     Ok(client)
 }
