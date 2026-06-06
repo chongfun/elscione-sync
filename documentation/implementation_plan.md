@@ -220,7 +220,7 @@ GLOBAL OPTIONS:
   -v, --verbose      Enable debug logging
 
 COMMANDS:
-  sync [OPTIONS]     Start or resume syncing (default command if none given)
+  sync [OPTIONS]     Discover files, then start or resume downloading (default command if none given)
   select             Open interactive ratatui folder selector
   status             Print file count summary grouped by status
   reset [--errors-only]  Reset interrupted/error/skipped files to 'pending'
@@ -235,7 +235,7 @@ SYNC OPTIONS:
   --exclude <PATTERN>...  Exclude URL patterns
   --extension <EXT>...    Only download files with this extension (e.g. epub)
   --dry-run               Plan without downloading; marks files as 'skipped'
-  --resume                Skip crawl phase, only download pending files
+  --resume                Skip crawl phase, only download pending files already in the database
 ```
 
 ---

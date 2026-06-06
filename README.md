@@ -2,7 +2,7 @@
 
 `elscione-sync` is a robust, resumable, and concurrent file mirroring CLI tool built in Rust. It is specifically designed to safely crawl and mirror the 14,000+ files from the JavaScript-rendered `server.elscione.com` (`h5ai` server) to your local machine.
 
-It utilizes an embedded SQLite database to persist state, ensuring that if you lose connection or cancel a 9-hour sync, you can resume exactly where you left off without re-downloading files or re-crawling the entire server.
+It utilizes an embedded SQLite database to persist state, ensuring that if you lose connection or cancel a long sync, completed files are not re-downloaded and interrupted downloads can be retried. Use `sync --resume` when you want to skip discovery and download only files already marked as `pending`.
 
 For a deep dive into the architecture, state machine, and data models, please see the **[Implementation Plan & Architecture Document](documentation/implementation_plan.md)**.
 
@@ -35,7 +35,7 @@ If no command is provided, it defaults to the `sync` command.
 #### `sync`
 Starts or resumes the synchronization process. This is the primary command.
 - **First run**: If no folders have been selected yet, this will automatically launch the interactive TUI folder selector.
-- **Subsequent runs**: It will pick up pending files from the database and begin downloading them concurrently.
+- **Subsequent runs**: By default, it runs discovery first so newly added files can be found, then downloads pending files concurrently.
 
 **Sync Options:**
 - `--output <DIR>` : Override the download destination directory.
@@ -45,7 +45,7 @@ Starts or resumes the synchronization process. This is the primary command.
 - `--exclude <PATTERN>...` : Exclude specific URL patterns (e.g. `--exclude "Games/**"`).
 - `--extension <EXT>...` : Only download files with this extension (e.g. `--extension epub`). Can be repeated.
 - `--dry-run` : Crawls the server and populates the database, but marks all files as `skipped` instead of downloading them.
-- `--resume` : Completely skips the discovery/crawl phase and immediately starts downloading files currently marked as `pending` in the database.
+- `--resume` : Skips the discovery/crawl phase and immediately starts downloading files currently marked as `pending` in the database.
 
 #### `select`
 Opens the interactive terminal UI (ratatui) to browse the server's root directories and select which folders you want to sync. Selections are saved to the database.
@@ -108,5 +108,5 @@ redownload_on_size_mismatch = true
 
 `elscione-sync` uses a local SQLite database (`~/.local/share/elscione-sync/state.db`) to track progress.
 
-1. **Crawl Phase:** The crawler securely bypasses JavaScript rendering by interacting with the internal JSON API. It catalogs files into the DB as `pending`.
+1. **Crawl Phase:** The crawler securely bypasses JavaScript rendering by interacting with the internal JSON API. It catalogs files into the DB as `pending`. Default `sync` runs this phase; `sync --resume` skips it.
 2. **Download Phase:** The downloader pulls batches of `pending` files and downloads them to `.part` files before atomically renaming them. If a download is interrupted (e.g. via `Ctrl-C`), the `.part` file is kept. On the next run, the database resets the interrupted file to `pending` and it is retried.
