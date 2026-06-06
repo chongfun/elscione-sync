@@ -42,7 +42,7 @@ Starts or resumes the synchronization process. This is the primary command.
 - `--concurrency <N>` : Override the maximum number of parallel downloads (default is 2).
 - `--delay <MS>` : Override the delay between HTTP requests in milliseconds.
 - `--include <FOLDER>...` : Include specific top-level folder(s), temporarily overriding your saved DB selections.
-- `--exclude <PATTERN>...` : Exclude specific URL patterns (e.g. `--exclude "Games/**"`).
+- `--exclude <PATTERN>...` : Exclude URLs containing a pattern. A trailing `/*` or `/**` is ignored, so `--exclude "Games/**"` matches URLs containing `Games`.
 - `--extension <EXT>...` : Only download files with this extension (e.g. `--extension epub`). Can be repeated.
 - `--dry-run` : Crawls the server and populates the database, but marks all files as `skipped` instead of downloading them.
 - `--resume` : Skips the discovery/crawl phase and immediately starts downloading files currently marked as `pending` in the database.

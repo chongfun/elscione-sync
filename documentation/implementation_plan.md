@@ -236,7 +236,7 @@ SYNC OPTIONS:
   --concurrency <N>       Override max parallel downloads
   --delay <MS>            Override delay between requests
   --include <FOLDER>...   Include specific folder(s), overrides DB selections
-  --exclude <PATTERN>...  Exclude URL patterns
+  --exclude <PATTERN>...  Exclude URLs containing a pattern; trailing /* or /** is ignored
   --extension <EXT>...    Only download files with this extension (e.g. epub)
   --dry-run               Plan without downloading; marks files as 'skipped'
   --resume                Skip crawl phase, only download pending files already in the database
