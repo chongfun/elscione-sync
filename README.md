@@ -4,6 +4,8 @@
 
 It utilizes an embedded SQLite database to persist state, ensuring that if you lose connection or cancel a long sync, completed files are not re-downloaded and interrupted downloads can be retried. Use `sync --resume` when you want to skip discovery and download only files already marked as `pending`.
 
+Please mirror responsibly: keep concurrency and delays conservative, avoid repeated full crawls, and respect any server guidance or access limits.
+
 For a deep dive into the architecture, state machine, and data models, please see the **[Implementation Plan & Architecture Document](documentation/implementation_plan.md)**.
 
 ---
@@ -29,6 +31,34 @@ If no command is provided, it defaults to the `sync` command.
 - `-v`, `--verbose` : Enable debug-level logging.
 
 ---
+
+### Common Workflows
+
+First run with the interactive folder selector:
+```bash
+cargo run -- sync
+```
+
+Download only files that are already pending in the database:
+```bash
+cargo run -- sync --resume
+```
+
+Preview a crawl without downloading files:
+```bash
+cargo run -- sync --dry-run
+```
+
+Sync only selected extensions:
+```bash
+cargo run -- sync --extension epub --extension cbz
+```
+
+Retry interrupted or failed work:
+```bash
+cargo run -- reset
+cargo run -- sync --resume
+```
 
 ### Commands
 
