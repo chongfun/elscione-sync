@@ -22,7 +22,7 @@ The structure is typically 3–4 levels deep (Root → Category → Series → F
 ## Decisions Locked
 * **Language & Tooling:** Rust via Cargo, using `tokio` for async execution, `reqwest` for HTTP communication, `rusqlite` for state management, and `indicatif` for terminal UI progress bars.
 * **API Protocol:** Use raw JSON POST requests directed at `{base_url}/?`, mimicking the web client payload (`{"action":"get","items":{"href":"...","what":1}}`) instead of form-encoded data.
-* **State Management:** A local `state.db` SQLite database using a two-table schema (`crawl_queue` and `files`) to enforce atomicity and support resumability.
+* **State Management:** A local `state.db` SQLite database using `crawl_queue`, `files`, and `selected_folders` tables to enforce atomicity and support resumability.
 * **Resiliency vs Freshness:** If a sync is started and the crawl queue is completely empty (no pending/error nodes), the crawler drops the old queue states and performs a fresh discovery run to find newly added server files.
 
 ## As Built
@@ -140,8 +140,10 @@ Tracks every discovered file and its download state.
 | `remote_path` | TEXT | Server path relative to base URL |
 | `last_modified` | TEXT | From h5ai API (formatted `YYYY-MM-DD HH:MM`) |
 | `size_bytes` | INTEGER | From h5ai API |
+| `local_path` | TEXT | Reserved for a resolved local destination path |
 | `status` | TEXT | `pending` \| `downloading` \| `done` \| `error` \| `skipped` |
 | `error_message` | TEXT | Populated on failure |
+| `retry_count` | INTEGER | Incremented when a download attempt records an error |
 | `discovered_at` | TEXT | ISO8601 timestamp |
 | `completed_at` | TEXT | ISO8601 timestamp |
 | `checksum_sha256` | TEXT | SHA-256 hex, populated after download |
@@ -151,7 +153,7 @@ Persists user's interactive TUI folder selections.
 
 | Column | Type | Notes |
 |---|---|---|
-| `path` | TEXT PK | e.g. `/Officially Translated Light Novels/` |
+| `path` | TEXT PK | e.g. `Officially Translated Light Novels` |
 | `enabled` | INTEGER | 1 = selected, 0 = deselected |
 | `size_bytes` | INTEGER | Total size in bytes of the folder contents (if known) |
 
