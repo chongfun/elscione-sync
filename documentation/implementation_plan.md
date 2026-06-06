@@ -21,7 +21,7 @@ The structure is typically 3–4 levels deep (Root → Category → Series → F
 
 ## Decisions Locked
 * **Language & Tooling:** Rust via Cargo, using `tokio` for async execution, `reqwest` for HTTP communication, `rusqlite` for state management, and `indicatif` for terminal UI progress bars.
-* **API Protocol:** Use raw JSON POST requests directed at `_h5ai/public/index.php` mimicking the web client payload (`{"action":"get","items":{"href":"...","what":1}}`) instead of form-encoded data.
+* **API Protocol:** Use raw JSON POST requests directed at `{base_url}/?`, mimicking the web client payload (`{"action":"get","items":{"href":"...","what":1}}`) instead of form-encoded data.
 * **State Management:** A local `state.db` SQLite database using a two-table schema (`crawl_queue` and `files`) to enforce atomicity and support resumability.
 * **Resiliency vs Freshness:** If a sync is started and the crawl queue is completely empty (no pending/error nodes), the crawler drops the old queue states and performs a fresh discovery run to find newly added server files.
 
