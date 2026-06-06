@@ -228,7 +228,7 @@ COMMANDS:
   select             Open interactive ratatui folder selector
   status             Print file count summary grouped by status
   reset [--errors-only]  Reset interrupted/error/skipped files to 'pending'
-  list [--filter <str>] [--status <str>]  List files with optional filters
+  list [--filter <str>] [--status <str>]  List up to 500 files with optional filters
   edit-config        Open config.toml in $EDITOR (or 'open -t' on macOS)
 
 SYNC OPTIONS:

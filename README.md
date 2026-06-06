@@ -59,7 +59,7 @@ Resets files in a bad state back to `pending` so they can be retried on the next
 - `--errors-only` : Only resets files that explicitly failed with an `error`.
 
 #### `list`
-Lists the files currently tracked in the local database.
+Lists up to 500 files currently tracked in the local database.
 - `--filter <str>` : Filter output by a substring in the file path.
 - `--status <str>` : Filter output by a specific status (e.g. `pending`, `done`).
 
