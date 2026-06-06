@@ -147,12 +147,21 @@ pub async fn run(
                     _ = cancel_token.cancelled() => return None,
                 };
                 
+                let mut ghost_client = match client.to_ghostwire() {
+                    Ok(gc) => gc,
+                    Err(e) => {
+                        warn!("Failed to create Ghostwire client: {e}");
+                        return None;
+                    }
+                };
+
+                let cookie = client.cookie.clone();
                 let mut attempts = 0;
                 let res = loop {
                     attempts += 1;
                     
                     let res = tokio::select! {
-                        res = fetch_directory(&client, &limiter, &url, &base_url) => res,
+                        res = fetch_directory(&mut ghost_client, cookie.as_deref(), &limiter, &url, &base_url) => res,
                         _ = cancel_token.cancelled() => return None,
                     };
                     
@@ -261,13 +270,14 @@ pub async fn run(
 
 /// Fetch a directory listing via the h5ai JSON API.
 async fn fetch_directory(
-    client: &reqwest::Client,
+    client: &mut ghostwire::Ghostwire,
+    cookie: Option<&str>,
     limiter: &RateLimiter,
     url: &str,
     base_url: &str,
 ) -> Result<Vec<parser::DirEntry>> {
     limiter.wait().await;
-    match try_h5ai(client, base_url, url).await {
+    match try_h5ai(client, cookie, base_url, url).await {
         Some(entries) => Ok(entries),
         None => {
             warn!("h5ai API returned no data for {url}");
@@ -279,7 +289,8 @@ async fn fetch_directory(
 /// Attempt to retrieve a directory listing via the h5ai JSON API.
 /// Returns `None` if the API is not available on this server.
 pub(crate) async fn try_h5ai(
-    client: &reqwest::Client,
+    client: &mut ghostwire::Ghostwire,
+    cookie: Option<&str>,
     base_url: &str,
     dir_url: &str,
 ) -> Option<Vec<parser::DirEntry>> {
@@ -299,7 +310,16 @@ pub(crate) async fn try_h5ai(
     }
 
     // ── Step 1: GET the page to extract the h5ai CSRF token ("clckd"). ──────
-    let page_html = match client.get(dir_url).send().await {
+    let mut get_opts = ghostwire::RequestOptions::default();
+    if let Some(cookie_str) = cookie {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(cookie_str) {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::COOKIE, val);
+            get_opts.headers = Some(headers);
+        }
+    }
+
+    let page_html = match client.request(reqwest::Method::GET, dir_url, get_opts).await {
         Ok(r) => r.text().await.unwrap_or_default(),
         Err(e) => {
             debug!("  [h5ai] GET {dir_url} failed: {e}");
@@ -320,16 +340,25 @@ pub(crate) async fn try_h5ai(
 
     let api_url = format!("{base}/?");
 
-    let mut req = client
-        .post(&api_url)
-        .header("Content-Type", "application/json;charset=utf-8")
-        .json(&json_payload);
+    let mut opts = ghostwire::RequestOptions::default();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("Content-Type", reqwest::header::HeaderValue::from_static("application/json;charset=utf-8"));
 
-    if let Some(token) = &clckd {
-        req = req.header("x-h5ai-clckd", token);
+    if let Some(cookie_str) = cookie {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(cookie_str) {
+            headers.insert(reqwest::header::COOKIE, val);
+        }
     }
 
-    let resp = match req.send().await {
+    if let Some(token) = &clckd {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(token) {
+            headers.insert("x-h5ai-clckd", val);
+        }
+    }
+    opts.headers = Some(headers);
+    opts.body_bytes = Some(bytes::Bytes::from(serde_json::to_vec(&json_payload).unwrap()));
+
+    let resp = match client.request(reqwest::Method::POST, &api_url, opts).await {
         Ok(r) => r,
         Err(e) => {
             debug!("  [h5ai] POST failed: {e}");

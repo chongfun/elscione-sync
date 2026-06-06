@@ -12,7 +12,8 @@ use tracing::{debug, warn};
 ///
 /// Returns the hex-encoded SHA-256 checksum of the downloaded bytes.
 pub async fn download_file(
-    client: &reqwest::Client,
+    client: &mut ghostwire::Ghostwire,
+    cookie: Option<&str>,
     url: &str,
     dest_path: &Path,
     last_modified: Option<&str>,
@@ -37,20 +38,35 @@ pub async fn download_file(
     };
 
     let mut resumed_bytes = 0;
-    let mut request = client.get(url);
-
     if part_path.exists() {
         if let Ok(meta) = fs::metadata(&part_path).await {
             let len = meta.len();
             if len > 0 {
                 resumed_bytes = len;
-                request = request.header("Range", format!("bytes={}-", len));
             }
         }
     }
 
-    let mut response = request
-        .send()
+    let mut opts = ghostwire::RequestOptions::default();
+    let mut headers = reqwest::header::HeaderMap::new();
+    if resumed_bytes > 0 {
+        headers.insert(
+            "Range",
+            reqwest::header::HeaderValue::from_str(&format!("bytes={}-", resumed_bytes))?,
+        );
+    }
+    if let Some(cookie_str) = cookie {
+        headers.insert(
+            reqwest::header::COOKIE,
+            reqwest::header::HeaderValue::from_str(cookie_str)?,
+        );
+    }
+    if !headers.is_empty() {
+        opts.headers = Some(headers);
+    }
+
+    let mut response = client
+        .request(reqwest::Method::GET, url, opts)
         .await
         .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?;
 
@@ -60,8 +76,17 @@ pub async fn download_file(
         if part_path.exists() {
             let _ = fs::remove_file(&part_path).await;
         }
-        response = client.get(url)
-            .send()
+        let mut opts = ghostwire::RequestOptions::default();
+        if let Some(cookie_str) = cookie {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::COOKIE,
+                reqwest::header::HeaderValue::from_str(cookie_str)?,
+            );
+            opts.headers = Some(headers);
+        }
+        response = client
+            .request(reqwest::Method::GET, url, opts)
             .await
             .map_err(|e| anyhow::anyhow!("GET {url} (retry after 416): {e}"))?;
     }

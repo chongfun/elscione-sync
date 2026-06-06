@@ -183,6 +183,18 @@ pub async fn run(
             let backoff_mult = config.rate_limit.backoff_multiplier;
 
             let handle = tokio::spawn(async move {
+                let mut ghost_client = match client.to_ghostwire() {
+                    Ok(gc) => gc,
+                    Err(e) => {
+                        warn!("Failed to create Ghostwire client: {e}");
+                        let record_id = record.id;
+                        let _ = crate::db::run_blocking(&db, move |conn| {
+                            Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
+                        }).await;
+                        return;
+                    }
+                };
+
                 let _permit = tokio::select! {
                     p = semaphore.acquire_owned() => match p {
                         Ok(permit) => permit,
@@ -285,7 +297,8 @@ pub async fn run(
                     }
 
                     let download_fut = file_writer::download_file(
-                        &client,
+                        &mut ghost_client,
+                        client.cookie.as_deref(),
                         &record.remote_url,
                         &dest_path,
                         record.last_modified.as_deref(),

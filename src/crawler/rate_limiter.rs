@@ -1,5 +1,4 @@
 use anyhow::Result;
-use reqwest::Client;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -20,24 +19,40 @@ impl RateLimiter {
     }
 }
 
-/// Build a reqwest Client with the configured User-Agent and sensible timeouts.
-pub fn build_client(user_agent: &str, cookie: Option<&str>) -> Result<Client> {
-    let mut builder = Client::builder()
-        .user_agent(user_agent)
-        .connect_timeout(Duration::from_secs(30))
-        .tcp_keepalive(Duration::from_secs(60))
-        // Set a long overall timeout of 1 hour to prevent hung connections
-        // while still supporting very large file transfers.
-        .timeout(Duration::from_secs(3600));
+#[derive(Clone)]
+pub struct GhostClient {
+    builder: ghostwire::GhostwireBuilder,
+    pub cookie: Option<String>,
+}
 
-    if let Some(cookie_str) = cookie {
-        let mut headers = reqwest::header::HeaderMap::new();
-        let mut val = reqwest::header::HeaderValue::from_str(cookie_str)?;
-        val.set_sensitive(true);
-        headers.insert(reqwest::header::COOKIE, val);
-        builder = builder.default_headers(headers);
+impl GhostClient {
+    pub fn new(builder: ghostwire::GhostwireBuilder, cookie: Option<String>) -> Self {
+        Self { builder, cookie }
     }
 
-    let client = builder.build()?;
-    Ok(client)
+    pub fn to_ghostwire(&self) -> Result<ghostwire::Ghostwire> {
+        self.builder.clone().build().map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+/// Build a Ghostwire client wrapper configured in stealth mode.
+pub fn build_client(user_agent: &str, cookie: Option<&str>) -> Result<GhostClient> {
+    let user_agent_opts = ghostwire::UserAgentOptions {
+        custom: Some(user_agent.to_string()),
+        ..Default::default()
+    };
+
+    let builder = ghostwire::Ghostwire::builder()
+        .user_agent_opts(user_agent_opts)
+        .min_request_interval_secs(0.0) // Respect rate limiting from RateLimiter
+        .stealth(ghostwire::StealthConfig {
+            enabled: true,
+            human_like_delays: false, // Respect rate limiting from RateLimiter
+            randomize_headers: true,
+            browser_quirks: true,
+            min_delay_secs: 0.0,
+            max_delay_secs: 0.0,
+        });
+
+    Ok(GhostClient::new(builder, cookie.map(|s| s.to_string())))
 }

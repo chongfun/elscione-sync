@@ -97,11 +97,13 @@ impl App {
 /// Uses the h5ai JSON API directly (the server is a JS-rendered h5ai instance).
 async fn fetch_folders(config: &Config) -> Result<Vec<FolderNode>> {
     let client = build_client(&config.server.user_agent, config.server.cookie.as_deref())?;
+    let mut ghostwire_client = client.to_ghostwire()?;
     info!("Fetching folder list from {}", config.server.base_url);
 
     // Try h5ai JSON API — this server is confirmed to run h5ai.
     if let Some(entries) = crate::crawler::try_h5ai(
-        &client,
+        &mut ghostwire_client,
+        client.cookie.as_deref(),
         &config.server.base_url,
         &config.server.base_url,
     )
