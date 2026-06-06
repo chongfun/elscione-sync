@@ -85,7 +85,7 @@ src/
 
 ### Config File
 
-Platform location: macOS `~/Library/Application Support/com.elscione.elscione-sync/config.toml`
+Platform location: determined by `directories::ProjectDirs::from("com", "elscione", "elscione-sync")`; on macOS this is `~/Library/Application Support/com.elscione.elscione-sync/config.toml`.
 
 ```toml
 [server]
@@ -99,6 +99,7 @@ dir = "~/elscione-mirror"
 max_parallel_downloads = 2
 delay_between_requests_ms = 1500  # Applied between each download request
 crawl_delay_ms = 500              # Applied between each crawl request
+max_crawl_retries = 3
 
 [rate_limit]
 backoff_initial_secs = 60
@@ -108,7 +109,7 @@ backoff_multiplier = 2.0
 [sync]
 include_folders = []           # Empty = all folders (or use TUI selector)
 exclude_patterns = []          # Substring match against URL
-allowed_extensions = ["epub"]  # Empty = all filetypes; e.g. ["epub", "cbz"]
+allowed_extensions = []        # Empty = all filetypes; e.g. ["epub", "cbz"]
 redownload_on_size_mismatch = true
 ```
 
@@ -116,7 +117,7 @@ redownload_on_size_mismatch = true
 
 ### State Database
 
-Platform location: macOS `~/Library/Application Support/com.elscione.elscione-sync/state.db`
+Platform location: determined by `directories::ProjectDirs::from("com", "elscione", "elscione-sync")`; on macOS this is `~/Library/Application Support/com.elscione.elscione-sync/state.db`.
 
 #### `crawl_queue` table
 Tracks folder discovery state for resumable BFS crawl.

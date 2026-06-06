@@ -25,7 +25,7 @@ You can run the tool via `cargo run -- [COMMAND] [OPTIONS]` or by executing the 
 If no command is provided, it defaults to the `sync` command.
 
 ### Global Options
-- `--config <PATH>` : Path to a custom config file (Defaults to `~/.config/elscione-sync/config.toml` or your platform's standard config directory).
+- `--config <PATH>` : Path to a custom config file. By default, `elscione-sync` uses your platform's standard application config directory.
 - `-v`, `--verbose` : Enable debug-level logging.
 
 ---
@@ -70,14 +70,17 @@ Instantly opens your `config.toml` file in your system's default `$EDITOR` (or `
 
 ## Configuration
 
-By default, `elscione-sync` generates a configuration file at `~/.config/elscione-sync/config.toml` (or the equivalent XDG/macOS application support directory). 
+By default, `elscione-sync` generates a configuration file in your platform's standard application config directory. Common locations include:
+
+- macOS: `~/Library/Application Support/com.elscione.elscione-sync/config.toml`
+- Linux: `~/.config/elscione-sync/config.toml`
 
 You can quickly edit this file by running:
 ```bash
 cargo run -- edit-config
 ```
 
-Example `config.toml`:
+Generated defaults resemble:
 ```toml
 [server]
 base_url = "https://server.elscione.com/"
@@ -90,6 +93,7 @@ dir = "~/elscione-mirror"
 max_parallel_downloads = 2
 delay_between_requests_ms = 1500
 crawl_delay_ms = 500
+max_crawl_retries = 3
 
 [rate_limit]
 backoff_initial_secs = 60
@@ -97,8 +101,9 @@ backoff_max_secs = 900
 backoff_multiplier = 2.0
 
 [sync]
-# Array of allowed file extensions. If empty, all files are downloaded.
-allowed_extensions = ["epub", "cbz"]
+include_folders = []
+exclude_patterns = []
+allowed_extensions = []
 redownload_on_size_mismatch = true
 ```
 
@@ -106,7 +111,10 @@ redownload_on_size_mismatch = true
 
 ## State & Resumability
 
-`elscione-sync` uses a local SQLite database (`~/.local/share/elscione-sync/state.db`) to track progress.
+`elscione-sync` uses a local SQLite database in your platform's standard application data directory to track progress. Common locations include:
+
+- macOS: `~/Library/Application Support/com.elscione.elscione-sync/state.db`
+- Linux: `~/.local/share/elscione-sync/state.db`
 
 1. **Crawl Phase:** The crawler securely bypasses JavaScript rendering by interacting with the internal JSON API. It catalogs files into the DB as `pending`. Default `sync` runs this phase; `sync --resume` skips it.
 2. **Download Phase:** The downloader pulls batches of `pending` files and downloads them to `.part` files before atomically renaming them. If a download is interrupted (e.g. via `Ctrl-C`), the `.part` file is kept. On the next run, the database resets the interrupted file to `pending` and it is retried.
