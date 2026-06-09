@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result as SqlResult, Row};
+use rusqlite::{params, params_from_iter, Connection, Result as SqlResult, Row};
 
 // ---------------------------------------------------------------------------
 // FileRecord
@@ -181,19 +181,20 @@ pub fn list_files(
     status_filter: Option<&str>,
 ) -> SqlResult<Vec<FileRecord>> {
     let mut query = format!("SELECT {FILE_COLUMNS} FROM files WHERE 1=1");
-    if path_filter.is_some() {
-        query.push_str(" AND remote_path LIKE ?1");
+    let mut query_params = Vec::new();
+    if let Some(path_filter) = path_filter {
+        query.push_str(" AND remote_path LIKE ?");
+        query_params.push(format!("%{path_filter}%"));
     }
-    if status_filter.is_some() {
-        query.push_str(" AND status = ?2");
+    if let Some(status_filter) = status_filter {
+        query.push_str(" AND status = ?");
+        query_params.push(status_filter.to_owned());
     }
     query.push_str(" ORDER BY remote_path LIMIT 500");
 
     let mut stmt = conn.prepare(&query)?;
-    let path_param = path_filter.map(|f| format!("%{f}%")).unwrap_or_default();
-    let status_param = status_filter.unwrap_or("");
 
-    let rows = stmt.query_map(params![path_param, status_param], FileRecord::from_row)?;
+    let rows = stmt.query_map(params_from_iter(query_params.iter()), FileRecord::from_row)?;
     rows.collect()
 }
 
@@ -305,4 +306,48 @@ pub fn has_any_selected_folders(conn: &Connection) -> SqlResult<bool> {
     let count: i64 =
         conn.query_row("SELECT COUNT(*) FROM selected_folders", [], |r| r.get(0))?;
     Ok(count > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::schema;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(schema::V1_INITIAL)
+            .expect("create schema");
+        conn
+    }
+
+    fn insert_file(conn: &Connection, remote_path: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO files (remote_url, remote_path, status, size_bytes)
+             VALUES (?1, ?2, ?3, 42)",
+            params![format!("https://example.test{remote_path}"), remote_path, status],
+        )
+        .expect("insert file");
+    }
+
+    #[test]
+    fn list_files_handles_all_filter_combinations() {
+        let conn = test_conn();
+        insert_file(&conn, "/Books/a.epub", "pending");
+        insert_file(&conn, "/Manga/b.cbz", "done");
+
+        let all = list_files(&conn, None, None).expect("list all");
+        assert_eq!(all.len(), 2);
+
+        let by_path = list_files(&conn, Some("Books"), None).expect("filter by path");
+        assert_eq!(by_path.len(), 1);
+        assert_eq!(by_path[0].remote_path, "/Books/a.epub");
+
+        let by_status = list_files(&conn, None, Some("done")).expect("filter by status");
+        assert_eq!(by_status.len(), 1);
+        assert_eq!(by_status[0].remote_path, "/Manga/b.cbz");
+
+        let by_both = list_files(&conn, Some("Books"), Some("pending")).expect("filter by both");
+        assert_eq!(by_both.len(), 1);
+        assert_eq!(by_both[0].remote_path, "/Books/a.epub");
+    }
 }
