@@ -101,7 +101,7 @@ async fn fetch_folders(config: &Config) -> Result<Vec<FolderNode>> {
     info!("Fetching folder list from {}", config.server.base_url);
 
     // Try h5ai JSON API — this server is confirmed to run h5ai.
-    if let Some(entries) = crate::crawler::try_h5ai(
+    match crate::crawler::try_h5ai(
         &mut ghostwire_client,
         client.cookie.as_deref(),
         &config.server.base_url,
@@ -109,12 +109,15 @@ async fn fetch_folders(config: &Config) -> Result<Vec<FolderNode>> {
     )
     .await
     {
-        if !entries.is_empty() {
-            return Ok(build_nodes(entries));
+        Ok(entries) => {
+            if !entries.is_empty() {
+                return Ok(build_nodes(entries));
+            }
+            eprintln!("h5ai API returned an empty response for the root directory.");
         }
-        eprintln!("h5ai API returned an empty response for the root directory.");
-    } else {
-        warn!("h5ai API request failed. Try running with --verbose for details.");
+        Err(error) => {
+            warn!("h5ai API request failed: {error}. Try running with --verbose for details.");
+        }
     }
 
     Ok(vec![])

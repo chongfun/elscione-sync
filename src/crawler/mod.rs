@@ -1,7 +1,7 @@
 pub mod parser;
 pub mod rate_limiter;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::DateTime;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
@@ -277,23 +277,17 @@ async fn fetch_directory(
     base_url: &str,
 ) -> Result<Vec<parser::DirEntry>> {
     limiter.wait().await;
-    match try_h5ai(client, cookie, base_url, url).await {
-        Some(entries) => Ok(entries),
-        None => {
-            warn!("h5ai API returned no data for {url}");
-            Ok(vec![])
-        }
-    }
+    try_h5ai(client, cookie, base_url, url).await
 }
 
 /// Attempt to retrieve a directory listing via the h5ai JSON API.
-/// Returns `None` if the API is not available on this server.
+/// Returns an error if the API is unavailable or returns an invalid response.
 pub(crate) async fn try_h5ai(
     client: &mut ghostwire::Ghostwire,
     cookie: Option<&str>,
     base_url: &str,
     dir_url: &str,
-) -> Option<Vec<parser::DirEntry>> {
+) -> Result<Vec<parser::DirEntry>> {
     let base = base_url.trim_end_matches('/');
 
     // Extract the URL path relative to the server root, e.g. "/" or "/Manga/".
@@ -319,13 +313,13 @@ pub(crate) async fn try_h5ai(
         }
     }
 
-    let page_html = match client.request(reqwest::Method::GET, dir_url, get_opts).await {
-        Ok(r) => r.text().await.unwrap_or_default(),
-        Err(e) => {
-            debug!("  [h5ai] GET {dir_url} failed: {e}");
-            String::new()
-        }
-    };
+    let page_html = client
+        .request(reqwest::Method::GET, dir_url, get_opts)
+        .await
+        .with_context(|| format!("h5ai page GET failed for {dir_url}"))?
+        .text()
+        .await
+        .with_context(|| format!("reading h5ai page body for {dir_url}"))?;
     let clckd = extract_clckd(&page_html);
 
     // ── Step 2: POST to the h5ai API. ────────────────────────────────────────
@@ -356,37 +350,26 @@ pub(crate) async fn try_h5ai(
         }
     }
     opts.headers = Some(headers);
-    opts.body_bytes = Some(bytes::Bytes::from(serde_json::to_vec(&json_payload).unwrap()));
+    opts.body_bytes = Some(bytes::Bytes::from(serde_json::to_vec(&json_payload)?));
 
-    let resp = match client.request(reqwest::Method::POST, &api_url, opts).await {
-        Ok(r) => r,
-        Err(e) => {
-            debug!("  [h5ai] POST failed: {e}");
-            return None;
-        }
-    };
+    let resp = client
+        .request(reqwest::Method::POST, &api_url, opts)
+        .await
+        .with_context(|| format!("h5ai API POST failed for {api_url}"))?;
 
     let status = resp.status();
 
     if !status.is_success() {
-        return None;
+        anyhow::bail!("h5ai API returned HTTP {status} for {api_url}");
     }
 
-    let text = match resp.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            debug!("  [h5ai] Failed to read response body: {e}");
-            return None;
-        }
-    };
+    let text = resp
+        .text()
+        .await
+        .with_context(|| format!("reading h5ai API body for {api_url}"))?;
 
-    let json: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(j) => j,
-        Err(e) => {
-            debug!("  [h5ai] JSON parse error: {e}");
-            return None;
-        }
-    };
+    let json: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing h5ai JSON from {api_url}"))?;
 
     
     parse_h5ai_response(&json, base, &href)
@@ -406,14 +389,20 @@ fn parse_h5ai_response(
     json: &serde_json::Value,
     base_url: &str,
     current_href: &str,
-) -> Option<Vec<parser::DirEntry>> {
-    let items = json.get("items")?.as_array()?;
+) -> Result<Vec<parser::DirEntry>> {
+    let items = json
+        .get("items")
+        .and_then(|items| items.as_array())
+        .context("h5ai response missing items array")?;
 
     let mut entries = Vec::new();
     let current = current_href.trim_end_matches('/');
 
     for item in items {
-        let href = item.get("href")?.as_str()?;
+        let Some(href) = item.get("href").and_then(|href| href.as_str()) else {
+            debug!("Skipping h5ai entry without href: {item}");
+            continue;
+        };
         let h = href.trim_end_matches('/');
 
         // Skip the directory itself and parent directory.
@@ -462,7 +451,7 @@ fn parse_h5ai_response(
         });
     }
 
-    Some(entries)
+    Ok(entries)
 }
 
 fn url_to_path(url: &str, base: &str) -> String {
@@ -487,4 +476,18 @@ fn is_excluded(url: &str, patterns: &[String]) -> bool {
         let pattern = p.trim_end_matches("/**").trim_end_matches("/*");
         url.contains(pattern)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h5ai_response_errors_when_items_are_missing() {
+        let json = serde_json::json!({ "error": "server failure" });
+
+        let result = parse_h5ai_response(&json, "https://example.test", "/");
+
+        assert!(result.is_err());
+    }
 }
