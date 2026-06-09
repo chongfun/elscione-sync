@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS files (
     last_modified   TEXT,
     size_bytes      INTEGER,
     local_path      TEXT,
-    status          TEXT NOT NULL DEFAULT 'pending',
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'downloading', 'done', 'error', 'skipped')),
     error_message   TEXT,
     retry_count     INTEGER NOT NULL DEFAULT 0,
     discovered_at   TEXT NOT NULL DEFAULT (datetime('now')),
@@ -20,7 +21,8 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS crawl_queue (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     url           TEXT NOT NULL UNIQUE,
-    status        TEXT NOT NULL DEFAULT 'pending',
+    status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending', 'done', 'error')),
     depth         INTEGER NOT NULL DEFAULT 0,
     discovered_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -35,4 +37,35 @@ CREATE TABLE IF NOT EXISTS selected_folders (
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 CREATE INDEX IF NOT EXISTS idx_files_remote_path ON files(remote_path);
 CREATE INDEX IF NOT EXISTS idx_crawl_queue_status ON crawl_queue(status);
+";
+
+/// V2 adds status validation for databases created before V1 had CHECK constraints.
+pub const V2_STATUS_VALIDATION: &str = "
+CREATE TRIGGER IF NOT EXISTS validate_files_status_insert
+BEFORE INSERT ON files
+WHEN NEW.status NOT IN ('pending', 'downloading', 'done', 'error', 'skipped')
+BEGIN
+    SELECT RAISE(ABORT, 'invalid files.status');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_files_status_update
+BEFORE UPDATE OF status ON files
+WHEN NEW.status NOT IN ('pending', 'downloading', 'done', 'error', 'skipped')
+BEGIN
+    SELECT RAISE(ABORT, 'invalid files.status');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_crawl_queue_status_insert
+BEFORE INSERT ON crawl_queue
+WHEN NEW.status NOT IN ('pending', 'done', 'error')
+BEGIN
+    SELECT RAISE(ABORT, 'invalid crawl_queue.status');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_crawl_queue_status_update
+BEFORE UPDATE OF status ON crawl_queue
+WHEN NEW.status NOT IN ('pending', 'done', 'error')
+BEGIN
+    SELECT RAISE(ABORT, 'invalid crawl_queue.status');
+END;
 ";

@@ -36,6 +36,7 @@ pub fn open_at(db_path: &Path) -> Result<Db> {
 fn run_migrations(conn: &mut Connection) -> Result<()> {
     let migrations = Migrations::new(vec![
         M::up(schema::V1_INITIAL),
+        M::up(schema::V2_STATUS_VALIDATION),
     ]);
     migrations
         .to_latest(conn)
@@ -57,4 +58,3 @@ where
     .await
     .context("database task panicked")?
 }
-

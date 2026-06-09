@@ -1,4 +1,4 @@
-use rusqlite::{params, params_from_iter, Connection, Result as SqlResult, Row};
+use rusqlite::{params, params_from_iter, types::Type, Connection, Result as SqlResult, Row};
 
 // ---------------------------------------------------------------------------
 // FileRecord
@@ -37,15 +37,15 @@ impl FileStatus {
 }
 
 impl std::str::FromStr for FileStatus {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> anyhow::Result<Self> {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "pending" => Ok(Self::Pending),
             "downloading" => Ok(Self::Downloading),
             "done" => Ok(Self::Done),
             "error" => Ok(Self::Error),
             "skipped" => Ok(Self::Skipped),
-            other => anyhow::bail!("unknown file status: {other}"),
+            other => Err(format!("unknown file status: {other}")),
         }
     }
 }
@@ -53,7 +53,12 @@ impl std::str::FromStr for FileStatus {
 impl FileRecord {
     fn from_row(row: &Row<'_>) -> SqlResult<Self> {
         let status_str: String = row.get(5)?;
-        let status = status_str.parse().unwrap_or(FileStatus::Pending);
+        let status = status_str.parse().map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                err,
+            )))
+        })?;
         Ok(Self {
             id: row.get(0)?,
             remote_url: row.get(1)?,
@@ -376,5 +381,32 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].remote_path, "/Books/a.epub");
         assert_eq!(files[1].remote_path, "/Books/b.epub");
+    }
+
+    #[test]
+    fn schema_rejects_invalid_file_status() {
+        let conn = test_conn();
+
+        let result = conn.execute(
+            "INSERT INTO files (remote_url, remote_path, status)
+             VALUES ('https://example.test/bad.epub', '/bad.epub', 'mystery')",
+            [],
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_file_status_rows_are_not_treated_as_pending() {
+        let conn = test_conn();
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .expect("disable check constraints");
+        insert_file(&conn, "/bad.epub", "mystery");
+        conn.execute_batch("PRAGMA ignore_check_constraints = OFF;")
+            .expect("enable check constraints");
+
+        let result = list_files(&conn, None, None);
+
+        assert!(result.is_err());
     }
 }
