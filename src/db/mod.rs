@@ -4,21 +4,18 @@ pub mod schema;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
-
-use crate::config::Config;
 
 /// Thread-safe handle to the SQLite database.
 pub type Db = Arc<Mutex<Connection>>;
 
-/// Open (or create) the SQLite state database and run pending migrations.
-pub fn open(_config: &Config) -> Result<Db> {
-    let db_path = crate::config::default_db_path();
+pub fn open_at(db_path: &Path) -> Result<Db> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut conn = Connection::open(&db_path)
+    let mut conn = Connection::open(db_path)
         .with_context(|| format!("opening database at {}", db_path.display()))?;
 
     // Enable WAL for better concurrent read performance.
@@ -60,6 +57,4 @@ where
     .await
     .context("database task panicked")?
 }
-
-
 

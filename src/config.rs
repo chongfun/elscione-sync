@@ -139,6 +139,13 @@ pub fn default_db_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("elscione-sync.db"))
 }
 
+pub fn db_path_for_config(config_path: Option<&Path>) -> PathBuf {
+    config_path
+        .and_then(Path::parent)
+        .map(|parent| parent.join("state.db"))
+        .unwrap_or_else(default_db_path)
+}
+
 /// Load config from the given path (or the default path if `None`).
 /// If no file exists, returns a default config and writes it to disk.
 pub fn load(path: Option<&Path>) -> Result<Config> {
@@ -193,5 +200,19 @@ impl Config {
             anyhow::bail!("server.base_url is not a valid URL: {e}");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_config_uses_state_db_next_to_config_file() {
+        let path = Path::new("/tmp/elscione/custom.toml");
+
+        let db_path = db_path_for_config(Some(path));
+
+        assert_eq!(db_path, PathBuf::from("/tmp/elscione/state.db"));
     }
 }
