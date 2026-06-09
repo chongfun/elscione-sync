@@ -11,6 +11,8 @@ use crate::config::Config;
 use crate::crawler::rate_limiter::{build_client, RateLimiter};
 use crate::db::{models, Db};
 
+const DOWNLOAD_BATCH_SIZE: usize = 128;
+
 pub async fn run(
     config: &Config,
     db: &Db,
@@ -62,7 +64,11 @@ pub async fn run(
         }
 
         let mut pending = crate::db::run_blocking(db, |conn| {
-            Ok(models::files_by_status(conn, "pending")?)
+            Ok(models::files_by_status_limited(
+                conn,
+                "pending",
+                DOWNLOAD_BATCH_SIZE,
+            )?)
         }).await?;
 
         if !config.sync.allowed_extensions.is_empty() {
@@ -183,18 +189,6 @@ pub async fn run(
             let backoff_mult = config.rate_limit.backoff_multiplier;
 
             let handle = tokio::spawn(async move {
-                let mut ghost_client = match client.to_ghostwire() {
-                    Ok(gc) => gc,
-                    Err(e) => {
-                        warn!("Failed to create Ghostwire client: {e}");
-                        let record_id = record.id;
-                        let _ = crate::db::run_blocking(&db, move |conn| {
-                            Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
-                        }).await;
-                        return;
-                    }
-                };
-
                 let _permit = tokio::select! {
                     p = semaphore.acquire_owned() => match p {
                         Ok(permit) => permit,
@@ -204,6 +198,18 @@ pub async fn run(
                         }
                     },
                     _ = cancel_token.cancelled() => {
+                        return;
+                    }
+                };
+
+                let mut ghost_client = match client.to_ghostwire() {
+                    Ok(gc) => gc,
+                    Err(e) => {
+                        warn!("Failed to create Ghostwire client: {e}");
+                        let record_id = record.id;
+                        let _ = crate::db::run_blocking(&db, move |conn| {
+                            Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
+                        }).await;
                         return;
                     }
                 };

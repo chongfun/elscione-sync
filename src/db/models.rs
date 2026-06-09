@@ -107,6 +107,19 @@ pub fn files_by_status(conn: &Connection, status: &str) -> SqlResult<Vec<FileRec
     rows.collect()
 }
 
+/// Load up to `limit` files with the given status.
+pub fn files_by_status_limited(
+    conn: &Connection,
+    status: &str,
+    limit: usize,
+) -> SqlResult<Vec<FileRecord>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {FILE_COLUMNS} FROM files WHERE status = ?1 ORDER BY id LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![status, limit as i64], FileRecord::from_row)?;
+    rows.collect()
+}
+
 /// Count files grouped by status.
 pub fn status_counts(conn: &Connection) -> SqlResult<Vec<(String, i64)>> {
     let mut stmt =
@@ -349,5 +362,19 @@ mod tests {
         let by_both = list_files(&conn, Some("Books"), Some("pending")).expect("filter by both");
         assert_eq!(by_both.len(), 1);
         assert_eq!(by_both[0].remote_path, "/Books/a.epub");
+    }
+
+    #[test]
+    fn files_by_status_limited_caps_result_count() {
+        let conn = test_conn();
+        insert_file(&conn, "/Books/a.epub", "pending");
+        insert_file(&conn, "/Books/b.epub", "pending");
+        insert_file(&conn, "/Books/c.epub", "pending");
+
+        let files = files_by_status_limited(&conn, "pending", 2).expect("load pending batch");
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].remote_path, "/Books/a.epub");
+        assert_eq!(files[1].remote_path, "/Books/b.epub");
     }
 }
