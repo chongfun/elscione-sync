@@ -3,12 +3,12 @@ pub mod rate_limiter;
 
 use anyhow::{Context, Result};
 use chrono::DateTime;
+use futures::stream::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use futures::stream::StreamExt;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -46,7 +46,10 @@ pub async fn run(
                 // If no pending work, clear the queue (done/error entries) to allow a fresh discovery.
                 models::clear_crawl_queue(conn)?;
                 models::enqueue_crawl(conn, &base_url, 0)?;
-                info!("Crawl queue was empty; starting fresh discovery from {}", base_url);
+                info!(
+                    "Crawl queue was empty; starting fresh discovery from {}",
+                    base_url
+                );
             } else {
                 let reset_count = models::reset_crawl_errors(conn)?;
                 if reset_count > 0 {
@@ -55,7 +58,8 @@ pub async fn run(
                 info!("Resuming crawl from existing queue entries.");
             }
             Ok(())
-        }).await?;
+        })
+        .await?;
     }
 
     // Spinner to show live crawl activity.
@@ -77,9 +81,8 @@ pub async fn run(
             break;
         }
 
-        let entries = crate::db::run_blocking(db, |conn| {
-            Ok(models::next_crawl_entries(conn, 10)?)
-        }).await?;
+        let entries =
+            crate::db::run_blocking(db, |conn| Ok(models::next_crawl_entries(conn, 10)?)).await?;
 
         if entries.is_empty() {
             break;
@@ -96,7 +99,8 @@ pub async fn run(
                 let entry_id = entry.id;
                 crate::db::run_blocking(db, move |conn| {
                     Ok(models::mark_crawl_done(conn, entry_id)?)
-                }).await?;
+                })
+                .await?;
                 continue;
             }
             visited.insert(entry.url.clone());
@@ -105,11 +109,15 @@ pub async fn run(
             if entry.depth == 1 && !include_folders.is_empty() {
                 let name = last_segment(&entry.url);
                 if !include_folders.iter().any(|f| name.contains(f.as_str())) {
-                    debug!("Skipping folder (not in selection): {} (name: {})", entry.url, name);
+                    debug!(
+                        "Skipping folder (not in selection): {} (name: {})",
+                        entry.url, name
+                    );
                     let entry_id = entry.id;
                     crate::db::run_blocking(db, move |conn| {
                         Ok(models::mark_crawl_done(conn, entry_id)?)
-                    }).await?;
+                    })
+                    .await?;
                     continue;
                 } else {
                     debug!("Entering selected folder: {}", entry.url);
@@ -121,7 +129,8 @@ pub async fn run(
                 let entry_id = entry.id;
                 crate::db::run_blocking(db, move |conn| {
                     Ok(models::mark_crawl_done(conn, entry_id)?)
-                }).await?;
+                })
+                .await?;
                 continue;
             }
 
@@ -146,7 +155,7 @@ pub async fn run(
                     },
                     _ = cancel_token.cancelled() => return None,
                 };
-                
+
                 let mut ghost_client = match client.to_ghostwire() {
                     Ok(gc) => gc,
                     Err(e) => {
@@ -159,12 +168,12 @@ pub async fn run(
                 let mut attempts = 0;
                 let res = loop {
                     attempts += 1;
-                    
+
                     let res = tokio::select! {
                         res = fetch_directory(&mut ghost_client, cookie.as_deref(), &limiter, &url, &base_url) => res,
                         _ = cancel_token.cancelled() => return None,
                     };
-                    
+
                     match res {
                         Ok(entries) => break Ok(entries),
                         Err(e) => {
@@ -183,7 +192,7 @@ pub async fn run(
                         }
                     }
                 };
-                
+
                 Some((entry_id, entry_depth, url, res))
             }));
         }
@@ -194,11 +203,7 @@ pub async fn run(
                 _ => continue, // either joined thread panicked or it was cancelled
             };
 
-            spinner.set_message(format!(
-                "Crawling ({} files found): {}",
-                files_found,
-                url
-            ));
+            spinner.set_message(format!("Crawling ({} files found): {}", files_found, url));
 
             match fetch_res {
                 Ok(dir_entries) => {
@@ -224,8 +229,11 @@ pub async fn run(
                                         .extension()
                                         .and_then(|s| s.to_str())
                                         .unwrap_or("");
-                                    
-                                    if !allowed_extensions.iter().any(|allowed| allowed.eq_ignore_ascii_case(ext)) {
+
+                                    if !allowed_extensions
+                                        .iter()
+                                        .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+                                    {
                                         debug!("Skipping file (extension not allowed): {}", de.url);
                                         continue;
                                     }
@@ -245,7 +253,8 @@ pub async fn run(
                         models::mark_crawl_done(&tx, entry_id)?;
                         tx.commit()?;
                         Ok(added)
-                    }).await?;
+                    })
+                    .await?;
                     files_found += added_files;
                 }
                 Err(e) => {
@@ -257,7 +266,8 @@ pub async fn run(
                             rusqlite::params![entry_id],
                         )?;
                         Ok(())
-                    }).await?;
+                    })
+                    .await?;
                 }
             }
         }
@@ -336,7 +346,10 @@ pub(crate) async fn try_h5ai(
 
     let mut opts = ghostwire::RequestOptions::default();
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("Content-Type", reqwest::header::HeaderValue::from_static("application/json;charset=utf-8"));
+    headers.insert(
+        "Content-Type",
+        reqwest::header::HeaderValue::from_static("application/json;charset=utf-8"),
+    );
 
     if let Some(cookie_str) = cookie {
         if let Ok(val) = reqwest::header::HeaderValue::from_str(cookie_str) {
@@ -371,7 +384,6 @@ pub(crate) async fn try_h5ai(
     let json: serde_json::Value =
         serde_json::from_str(&text).with_context(|| format!("parsing h5ai JSON from {api_url}"))?;
 
-    
     parse_h5ai_response(&json, base, &href)
 }
 
@@ -425,9 +437,17 @@ fn parse_h5ai_response(
         let url = match reqwest::Url::parse(base_url) {
             Ok(base) => match base.join(href) {
                 Ok(joined) => joined.to_string(),
-                Err(_) => format!("{}/{}", base_url.trim_end_matches('/'), href.trim_start_matches('/')),
+                Err(_) => format!(
+                    "{}/{}",
+                    base_url.trim_end_matches('/'),
+                    href.trim_start_matches('/')
+                ),
             },
-            Err(_) => format!("{}/{}", base_url.trim_end_matches('/'), href.trim_start_matches('/')),
+            Err(_) => format!(
+                "{}/{}",
+                base_url.trim_end_matches('/'),
+                href.trim_start_matches('/')
+            ),
         };
 
         // h5ai provides timestamps in milliseconds since epoch.

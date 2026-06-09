@@ -24,7 +24,7 @@ pub fn open_at(db_path: &Path) -> Result<Db> {
          PRAGMA busy_timeout=5000;
          PRAGMA synchronous=NORMAL;
          PRAGMA cache_size=-8000;
-         PRAGMA foreign_keys=ON;"
+         PRAGMA foreign_keys=ON;",
     )?;
 
     run_migrations(&mut conn)?;

@@ -1,39 +1,19 @@
 mod cli;
 mod config;
-mod db;
 mod crawler;
+mod db;
 mod downloader;
-mod tui;
 mod sync;
+mod tui;
 
 use anyhow::{Context, Result};
-use cli::{Cli, Commands};
 use clap::Parser;
+use cli::{Cli, Commands};
 use std::path::PathBuf;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{fmt, EnvFilter};
 
 fn command_needs_database(command: &Option<Commands>) -> bool {
     !matches!(command, Some(Commands::EditConfig))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn edit_config_does_not_require_database() {
-        assert!(!command_needs_database(&Some(Commands::EditConfig)));
-    }
-
-    #[test]
-    fn sync_and_inspection_commands_require_database() {
-        assert!(command_needs_database(&None));
-        assert!(command_needs_database(&Some(Commands::Status)));
-        assert!(command_needs_database(&Some(Commands::List {
-            filter: None,
-            status: None,
-        })));
-    }
 }
 
 #[tokio::main]
@@ -136,4 +116,24 @@ fn edit_config(config_path: Option<PathBuf>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_config_does_not_require_database() {
+        assert!(!command_needs_database(&Some(Commands::EditConfig)));
+    }
+
+    #[test]
+    fn sync_and_inspection_commands_require_database() {
+        assert!(command_needs_database(&None));
+        assert!(command_needs_database(&Some(Commands::Status)));
+        assert!(command_needs_database(&Some(Commands::List {
+            filter: None,
+            status: None,
+        })));
+    }
 }

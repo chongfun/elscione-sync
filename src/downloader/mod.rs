@@ -30,21 +30,30 @@ pub async fn run(
                     .extension()
                     .and_then(|s| s.to_str())
                     .unwrap_or("");
-                if !allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(ext)) {
+                if !allowed_extensions
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(ext))
+                {
                     let _ = models::set_file_status(conn, record.id, "skipped", None, None);
                 }
             }
             Ok(())
-        }).await?;
+        })
+        .await?;
     }
 
     // 2. Print accurate summary
     {
         let (pending_count, pending_bytes) = crate::db::run_blocking(db, |conn| {
             let pending_bytes = models::pending_bytes(conn)?;
-            let pending_count = conn.query_row("SELECT COUNT(*) FROM files WHERE status='pending'", [], |r| r.get::<_, i64>(0))?;
+            let pending_count = conn.query_row(
+                "SELECT COUNT(*) FROM files WHERE status='pending'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?;
             Ok((pending_count, pending_bytes))
-        }).await?;
+        })
+        .await?;
         info!(
             "Download queue: {} file(s) / {}",
             pending_count,
@@ -69,7 +78,8 @@ pub async fn run(
                 "pending",
                 DOWNLOAD_BATCH_SIZE,
             )?)
-        }).await?;
+        })
+        .await?;
 
         if !config.sync.allowed_extensions.is_empty() {
             let allowed_extensions = config.sync.allowed_extensions.clone();
@@ -82,8 +92,11 @@ pub async fn run(
                         .extension()
                         .and_then(|s| s.to_str())
                         .unwrap_or("");
-                    
-                    if allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(ext)) {
+
+                    if allowed_extensions
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(ext))
+                    {
                         filtered.push(record);
                     } else {
                         to_skip.push(record.id);
@@ -93,10 +106,14 @@ pub async fn run(
                     let _ = models::set_file_status(conn, *id, "skipped", None, None);
                 }
                 Ok((filtered, to_skip))
-            }).await?;
+            })
+            .await?;
             pending = filtered;
             for id in to_skip {
-                debug!("Skipping file during download (extension not allowed) ID: {}", id);
+                debug!(
+                    "Skipping file during download (extension not allowed) ID: {}",
+                    id
+                );
             }
         }
 
@@ -104,8 +121,15 @@ pub async fn run(
             // Check if there are any pending files left in the DB. If we skipped the whole
             // batch, we should fetch the next batch. If there are truly no pending files, break.
             let count = crate::db::run_blocking(db, |conn| {
-                Ok(conn.query_row("SELECT COUNT(*) FROM files WHERE status='pending'", [], |r| r.get::<_, i64>(0)).unwrap_or(0))
-            }).await?;
+                Ok(conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM files WHERE status='pending'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0))
+            })
+            .await?;
             if count == 0 {
                 break;
             } else {
@@ -160,8 +184,11 @@ pub async fn run(
                 info!("[DRY RUN] Would download: {}", record.remote_path);
                 let record_id = record.id;
                 crate::db::run_blocking(db, move |conn| {
-                    Ok(models::set_file_status(conn, record_id, "skipped", None, None)?)
-                }).await?;
+                    Ok(models::set_file_status(
+                        conn, record_id, "skipped", None, None,
+                    )?)
+                })
+                .await?;
                 overall.inc(1);
                 continue;
             }
@@ -170,8 +197,15 @@ pub async fn run(
             {
                 let record_id = record.id;
                 crate::db::run_blocking(db, move |conn| {
-                    Ok(models::set_file_status(conn, record_id, "downloading", None, None)?)
-                }).await?;
+                    Ok(models::set_file_status(
+                        conn,
+                        record_id,
+                        "downloading",
+                        None,
+                        None,
+                    )?)
+                })
+                .await?;
             }
 
             let client = client.clone();
@@ -208,8 +242,11 @@ pub async fn run(
                         warn!("Failed to create Ghostwire client: {e}");
                         let record_id = record.id;
                         let _ = crate::db::run_blocking(&db, move |conn| {
-                            Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
-                        }).await;
+                            Ok(models::set_file_status(
+                                conn, record_id, "pending", None, None,
+                            )?)
+                        })
+                        .await;
                         return;
                     }
                 };
@@ -217,8 +254,11 @@ pub async fn run(
                 if cancel_token.is_cancelled() {
                     let record_id = record.id;
                     let _ = crate::db::run_blocking(&db, move |conn| {
-                        Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
-                    }).await;
+                        Ok(models::set_file_status(
+                            conn, record_id, "pending", None, None,
+                        )?)
+                    })
+                    .await;
                     return;
                 }
 
@@ -239,8 +279,11 @@ pub async fn run(
                             info!("Already complete (size match): {}", dest_path.display());
                             let record_id = record.id;
                             let _ = crate::db::run_blocking(&db, move |conn| {
-                                Ok(models::set_file_status(conn, record_id, "done", None, None)?)
-                            }).await;
+                                Ok(models::set_file_status(
+                                    conn, record_id, "done", None, None,
+                                )?)
+                            })
+                            .await;
                             overall.inc(1);
                             already_exists_and_done = true;
                         } else if !redownload_on_mismatch {
@@ -250,8 +293,11 @@ pub async fn run(
                             );
                             let record_id = record.id;
                             let _ = crate::db::run_blocking(&db, move |conn| {
-                                Ok(models::set_file_status(conn, record_id, "skipped", None, None)?)
-                            }).await;
+                                Ok(models::set_file_status(
+                                    conn, record_id, "skipped", None, None,
+                                )?)
+                            })
+                            .await;
                             overall.inc(1);
                             already_exists_and_skipped = true;
                         }
@@ -268,9 +314,7 @@ pub async fn run(
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let pb = multi.add(ProgressBar::new(
-                    record.size_bytes.unwrap_or(0) as u64,
-                ));
+                let pb = multi.add(ProgressBar::new(record.size_bytes.unwrap_or(0) as u64));
                 pb.set_style(
                     ProgressStyle::with_template(
                         "  {spinner:.green} {wide_msg} [{bar:30.green/dim}] {bytes}/{total_bytes}",
@@ -297,20 +341,27 @@ pub async fn run(
                         multi.remove(&pb);
                         let record_id = record.id;
                         let _ = crate::db::run_blocking(&db, move |conn| {
-                            Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
-                        }).await;
+                            Ok(models::set_file_status(
+                                conn, record_id, "pending", None, None,
+                            )?)
+                        })
+                        .await;
                         return;
                     }
 
                     let download_fut = file_writer::download_file(
                         &mut ghost_client,
-                        client.cookie.as_deref(),
-                        &record.remote_url,
-                        &dest_path,
-                        record.last_modified.as_deref(),
-                        Some(&pb),
-                        Some(&overall),
-                        Some(remaining_bytes.clone()),
+                        file_writer::DownloadRequest {
+                            cookie: client.cookie.as_deref(),
+                            url: &record.remote_url,
+                            dest_path: &dest_path,
+                            last_modified: record.last_modified.as_deref(),
+                        },
+                        file_writer::DownloadProgress {
+                            file: Some(&pb),
+                            overall: Some(&overall),
+                            remaining_bytes: Some(remaining_bytes.clone()),
+                        },
                     );
 
                     let result = tokio::select! {
@@ -334,17 +385,16 @@ pub async fn run(
                                 pb.set_position(len);
                             }
                             pb.finish_and_clear();
-                            
+
                             // Explicitly remove it from MultiProgress to prevent memory/redraw leaks
                             // over long syncs.
                             multi.remove(&pb);
 
                             // Print a clean, permanent success line
-                            let size_str = bytesize::ByteSize(record.size_bytes.unwrap_or(0) as u64).to_string();
-                            let _ = multi.println(format!(
-                                "  ✓ {} ({})",
-                                file_name, size_str
-                            ));
+                            let size_str =
+                                bytesize::ByteSize(record.size_bytes.unwrap_or(0) as u64)
+                                    .to_string();
+                            let _ = multi.println(format!("  ✓ {} ({})", file_name, size_str));
 
                             let record_id = record.id;
                             let checksum_clone = checksum.clone();
@@ -356,26 +406,31 @@ pub async fn run(
                                     None,
                                     Some(&checksum_clone),
                                 )?)
-                            }).await;
+                            })
+                            .await;
                             break;
                         }
                         Err(e) => {
                             if attempts >= max_attempts {
                                 pb.finish_and_clear();
                                 multi.remove(&pb);
-                                let _ = multi.println(format!("  ✗ {} (failed after {} attempts): {}", record.remote_path, attempts, e));
+                                let _ = multi.println(format!(
+                                    "  ✗ {} (failed after {} attempts): {}",
+                                    record.remote_path, attempts, e
+                                ));
                                 let record_id = record.id;
                                 let err_msg = e.to_string();
                                 let _ = crate::db::run_blocking(&db, move |conn| {
                                     Ok(models::record_error(conn, record_id, &err_msg)?)
-                                }).await;
+                                })
+                                .await;
                                 break;
                             } else {
                                 let _ = multi.println(format!(
                                     "  ⚠ {} failed (attempt {}): {}. Retrying in {}s...",
                                     file_name, attempts, e, backoff
                                 ));
-                                
+
                                 // Sleep and wait for backoff or cancellation
                                 let sleep_res = tokio::select! {
                                     _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => Ok(()),
@@ -386,12 +441,16 @@ pub async fn run(
                                     multi.remove(&pb);
                                     let record_id = record.id;
                                     let _ = crate::db::run_blocking(&db, move |conn| {
-                                        Ok(models::set_file_status(conn, record_id, "pending", None, None)?)
-                                    }).await;
+                                        Ok(models::set_file_status(
+                                            conn, record_id, "pending", None, None,
+                                        )?)
+                                    })
+                                    .await;
                                     return;
                                 }
 
-                                backoff = (backoff as f64 * backoff_mult).min(backoff_max as f64) as u64;
+                                backoff =
+                                    (backoff as f64 * backoff_mult).min(backoff_max as f64) as u64;
                             }
                         }
                     }
@@ -412,7 +471,8 @@ pub async fn run(
         // Check if any new pending files appeared during this batch (from a concurrent crawl).
         let remaining = crate::db::run_blocking(db, |conn| {
             Ok(models::files_by_status(conn, "pending")?.len())
-        }).await?;
+        })
+        .await?;
         if remaining == 0 {
             break;
         }

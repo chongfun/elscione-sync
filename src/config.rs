@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Top-level application configuration (mirrors config.toml structure).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -31,7 +30,10 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             base_url: "https://server.elscione.com/".to_owned(),
-            user_agent: format!("elscione-sync/{} (personal mirror)", env!("CARGO_PKG_VERSION")),
+            user_agent: format!(
+                "elscione-sync/{} (personal mirror)",
+                env!("CARGO_PKG_VERSION")
+            ),
             cookie: None,
         }
     }
@@ -149,9 +151,7 @@ pub fn db_path_for_config(config_path: Option<&Path>) -> PathBuf {
 /// Load config from the given path (or the default path if `None`).
 /// If no file exists, returns a default config and writes it to disk.
 pub fn load(path: Option<&Path>) -> Result<Config> {
-    let config_path = path
-        .map(PathBuf::from)
-        .unwrap_or_else(default_config_path);
+    let config_path = path.map(PathBuf::from).unwrap_or_else(default_config_path);
 
     if !config_path.exists() {
         let cfg = Config::default();
@@ -165,7 +165,7 @@ pub fn load(path: Option<&Path>) -> Result<Config> {
         .with_context(|| format!("reading config from {}", config_path.display()))?;
     let mut cfg: Config =
         toml::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
-    
+
     for ext in &mut cfg.sync.allowed_extensions {
         if ext.starts_with('.') {
             *ext = ext.trim_start_matches('.').to_owned();
@@ -186,7 +186,6 @@ pub fn save(config: &Config, path: &Path) -> Result<()> {
     std::fs::write(path, toml)?;
     Ok(())
 }
-
 
 impl Config {
     pub fn validate(&self) -> Result<()> {

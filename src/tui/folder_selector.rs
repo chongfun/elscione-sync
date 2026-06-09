@@ -56,7 +56,8 @@ impl App {
             return;
         }
         let i = self.state.selected().unwrap_or(0);
-        self.state.select(Some(if i == 0 { self.nodes.len() - 1 } else { i - 1 }));
+        self.state
+            .select(Some(if i == 0 { self.nodes.len() - 1 } else { i - 1 }));
     }
 
     fn move_down(&mut self) {
@@ -137,7 +138,6 @@ fn build_nodes(entries: Vec<parser::DirEntry>) -> Vec<FolderNode> {
         .collect()
 }
 
-
 fn render_ui(f: &mut Frame, app: &App) {
     let area = f.area();
 
@@ -153,7 +153,12 @@ fn render_ui(f: &mut Frame, app: &App) {
 
     // ── Title ──
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("elscione-sync", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "elscione-sync",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  ·  Select folders to mirror"),
     ]))
     .block(Block::default().borders(Borders::ALL));
@@ -222,7 +227,9 @@ fn render_ui(f: &mut Frame, app: &App) {
                 if selected_count == 1 { "" } else { "s" },
                 total_size_str
             ),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "  [Space] toggle  [a] all  [n] none  [↑↓/jk] navigate  [Enter] confirm  [q] quit",
@@ -230,8 +237,11 @@ fn render_ui(f: &mut Frame, app: &App) {
         ),
     ]);
 
-    let status = Paragraph::new(help_line)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+    let status = Paragraph::new(help_line).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
     f.render_widget(status, chunks[2]);
 }
 
@@ -248,13 +258,13 @@ pub async fn run(config: &Config, db: &Db) -> Result<()> {
     }
 
     // Load any existing selections from DB.
-    let existing_selections: Vec<String> = crate::db::run_blocking(db, |conn| {
-        Ok(models::load_selected_folders(conn)?)
-    }).await?
-    .into_iter()
-    .filter(|f| f.enabled)
-    .map(|f| f.path)
-    .collect();
+    let existing_selections: Vec<String> =
+        crate::db::run_blocking(db, |conn| Ok(models::load_selected_folders(conn)?))
+            .await?
+            .into_iter()
+            .filter(|f| f.enabled)
+            .map(|f| f.path)
+            .collect();
 
     let nodes: Vec<FolderNode> = nodes
         .into_iter()
@@ -339,7 +349,8 @@ pub async fn run(config: &Config, db: &Db) -> Result<()> {
 
             crate::db::run_blocking(db, move |conn| {
                 Ok(models::save_selected_folders(conn, &folders)?)
-            }).await?;
+            })
+            .await?;
 
             println!(
                 "Saved {} folder selection{}.",

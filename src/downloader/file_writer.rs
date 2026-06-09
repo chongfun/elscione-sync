@@ -7,20 +7,36 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, warn};
 
+pub struct DownloadRequest<'a> {
+    pub cookie: Option<&'a str>,
+    pub url: &'a str,
+    pub dest_path: &'a Path,
+    pub last_modified: Option<&'a str>,
+}
+
+#[derive(Default)]
+pub struct DownloadProgress<'a> {
+    pub file: Option<&'a ProgressBar>,
+    pub overall: Option<&'a ProgressBar>,
+    pub remaining_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+}
+
 /// Download `url` to `dest_path`, writing via a `.part` temp file and atomically
 /// renaming on completion.
 ///
 /// Returns the hex-encoded SHA-256 checksum of the downloaded bytes.
 pub async fn download_file(
     client: &mut ghostwire::Ghostwire,
-    cookie: Option<&str>,
-    url: &str,
-    dest_path: &Path,
-    last_modified: Option<&str>,
-    pb: Option<&ProgressBar>,
-    overall: Option<&ProgressBar>,
-    remaining_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    request: DownloadRequest<'_>,
+    progress: DownloadProgress<'_>,
 ) -> Result<String> {
+    let DownloadRequest {
+        cookie,
+        url,
+        dest_path,
+        last_modified,
+    } = request;
+
     // Ensure parent directory exists.
     if let Some(parent) = dest_path.parent() {
         fs::create_dir_all(parent).await?;
@@ -99,7 +115,8 @@ pub async fn download_file(
     }
 
     let mut hasher = Sha256::new();
-    let mut file = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT && resumed_bytes > 0 {
+    let mut file = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT && resumed_bytes > 0
+    {
         // Read existing bytes from the part file to update the hasher.
         let mut file_read = File::open(&part_path).await?;
         let mut buffer = vec![0u8; 65536];
@@ -112,7 +129,7 @@ pub async fn download_file(
         }
         drop(file_read);
 
-        if let Some(p) = pb {
+        if let Some(p) = progress.file {
             p.inc(resumed_bytes);
         }
 
@@ -136,12 +153,14 @@ pub async fn download_file(
         let len = chunk.len() as u64;
         hasher.update(&chunk);
         file.write_all(&chunk).await?;
-        
-        if let Some(p) = pb {
+
+        if let Some(p) = progress.file {
             p.inc(len);
         }
-        if let (Some(o), Some(rem)) = (overall, &remaining_bytes) {
-            let current_rem = rem.fetch_sub(len, std::sync::atomic::Ordering::Relaxed).saturating_sub(len);
+        if let (Some(o), Some(rem)) = (progress.overall, &progress.remaining_bytes) {
+            let current_rem = rem
+                .fetch_sub(len, std::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(len);
             o.set_message(format!("{} remaining", bytesize::ByteSize(current_rem)));
         }
     }

@@ -25,15 +25,16 @@ pub async fn run(
         config.concurrency.delay_between_requests_ms = delay;
     }
     if !opts.extensions.is_empty() {
-        config.sync.allowed_extensions = opts.extensions.iter()
+        config.sync.allowed_extensions = opts
+            .extensions
+            .iter()
             .map(|ext| ext.trim_start_matches('.').to_owned())
             .collect();
     }
 
     // First run: open folder selector if no selections saved and no CLI include specified.
-    let has_selections = crate::db::run_blocking(&db, |conn| {
-        Ok(models::has_any_selected_folders(conn)?)
-    }).await?;
+    let has_selections =
+        crate::db::run_blocking(&db, |conn| Ok(models::has_any_selected_folders(conn)?)).await?;
 
     if !has_selections && opts.include.is_empty() {
         info!("No folder selections found — launching interactive selector.");
@@ -44,13 +45,12 @@ pub async fn run(
     let include_folders: Vec<String> = if !opts.include.is_empty() {
         opts.include.clone()
     } else {
-        crate::db::run_blocking(&db, |conn| {
-            Ok(models::load_selected_folders(conn)?)
-        }).await?
-        .into_iter()
-        .filter(|f| f.enabled)
-        .map(|f| f.path)
-        .collect()
+        crate::db::run_blocking(&db, |conn| Ok(models::load_selected_folders(conn)?))
+            .await?
+            .into_iter()
+            .filter(|f| f.enabled)
+            .map(|f| f.path)
+            .collect()
     };
 
     if include_folders.is_empty() && config.sync.include_folders.is_empty() {
@@ -60,9 +60,9 @@ pub async fn run(
 
     // Reset any stale 'downloading' records from a previous interrupted run.
     {
-        let reset = crate::db::run_blocking(&db, |conn| {
-            Ok(models::reset_interrupted(conn, false)?)
-        }).await?;
+        let reset =
+            crate::db::run_blocking(&db, |conn| Ok(models::reset_interrupted(conn, false)?))
+                .await?;
         if reset > 0 {
             info!("Reset {reset} interrupted downloads to 'pending'.");
         }
@@ -110,14 +110,19 @@ pub async fn print_status(db: &Db) -> Result<()> {
         let counts = models::status_counts(conn)?;
         let pending_bytes = models::pending_bytes(conn)?;
         Ok((counts, pending_bytes))
-    }).await?;
+    })
+    .await?;
 
     println!("\n─── elscione-sync status ───────────────────");
     for (status, count) in &counts {
         println!("  {:<12} {}", status, count);
     }
     if pending_bytes > 0 {
-        println!("  {:<12} {}", "pending size", ByteSize(pending_bytes as u64));
+        println!(
+            "  {:<12} {}",
+            "pending size",
+            ByteSize(pending_bytes as u64)
+        );
     }
     println!("────────────────────────────────────────────\n");
     Ok(())
@@ -127,7 +132,8 @@ pub async fn print_status(db: &Db) -> Result<()> {
 pub async fn reset(db: &Db, errors_only: bool) -> Result<()> {
     let n = crate::db::run_blocking(db, move |conn| {
         Ok(models::reset_interrupted(conn, errors_only)?)
-    }).await?;
+    })
+    .await?;
     println!("Reset {n} file(s) to 'pending'.");
     Ok(())
 }
@@ -137,18 +143,27 @@ pub async fn list(db: &Db, filter: Option<&str>, status: Option<&str>) -> Result
     let filter = filter.map(|s| s.to_owned());
     let status = status.map(|s| s.to_owned());
     let files = crate::db::run_blocking(db, move |conn| {
-        Ok(models::list_files(conn, filter.as_deref(), status.as_deref())?)
-    }).await?;
+        Ok(models::list_files(
+            conn,
+            filter.as_deref(),
+            status.as_deref(),
+        )?)
+    })
+    .await?;
     println!("{:<10} {:<12} {:<10} PATH", "ID", "STATUS", "SIZE");
     for f in &files {
         let size = f
             .size_bytes
             .map(|b| ByteSize(b as u64).to_string())
             .unwrap_or_else(|| "—".to_owned());
-        println!("{:<10} {:<12} {:<10} {}", f.id, f.status.as_str(), size, f.remote_path);
+        println!(
+            "{:<10} {:<12} {:<10} {}",
+            f.id,
+            f.status.as_str(),
+            size,
+            f.remote_path
+        );
     }
     println!("({} result(s))", files.len());
     Ok(())
 }
-
-

@@ -54,10 +54,11 @@ impl FileRecord {
     fn from_row(row: &Row<'_>) -> SqlResult<Self> {
         let status_str: String = row.get(5)?;
         let status = status_str.parse().map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                err,
-            )))
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, err)),
+            )
         })?;
         Ok(Self {
             id: row.get(0)?,
@@ -74,8 +75,7 @@ impl FileRecord {
 // File operations
 // ---------------------------------------------------------------------------
 
-const FILE_COLUMNS: &str =
-    "id, remote_url, remote_path, last_modified, size_bytes, status";
+const FILE_COLUMNS: &str = "id, remote_url, remote_path, last_modified, size_bytes, status";
 
 /// Insert or update a file record.
 pub fn upsert_file(
@@ -265,10 +265,11 @@ pub fn mark_crawl_done(conn: &Connection, id: i64) -> SqlResult<()> {
 }
 
 pub fn has_pending_crawl(conn: &Connection) -> SqlResult<bool> {
-    let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM crawl_queue WHERE status='pending'", [], |r| {
-            r.get(0)
-        })?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM crawl_queue WHERE status='pending'",
+        [],
+        |r| r.get(0),
+    )?;
     Ok(count > 0)
 }
 
@@ -321,8 +322,7 @@ pub fn save_selected_folders(conn: &Connection, folders: &[SelectedFolder]) -> S
 }
 
 pub fn has_any_selected_folders(conn: &Connection) -> SqlResult<bool> {
-    let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM selected_folders", [], |r| r.get(0))?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM selected_folders", [], |r| r.get(0))?;
     Ok(count > 0)
 }
 
@@ -342,7 +342,11 @@ mod tests {
         conn.execute(
             "INSERT INTO files (remote_url, remote_path, status, size_bytes)
              VALUES (?1, ?2, ?3, 42)",
-            params![format!("https://example.test{remote_path}"), remote_path, status],
+            params![
+                format!("https://example.test{remote_path}"),
+                remote_path,
+                status
+            ],
         )
         .expect("insert file");
     }
