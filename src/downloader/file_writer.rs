@@ -117,6 +117,23 @@ pub async fn download_file(
         ));
     }
 
+    // A 206 must resume exactly where we asked, or appending would corrupt the
+    // file. Drop the part file so the retry restarts from scratch.
+    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT && resumed_bytes > 0 {
+        let range_start = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(content_range_start);
+        if range_start != Some(resumed_bytes) {
+            let _ = fs::remove_file(&part_path).await;
+            return Err(anyhow::anyhow!(
+                "206 response resumed at {range_start:?} instead of requested offset \
+                 {resumed_bytes} for {url}; discarding partial file"
+            ));
+        }
+    }
+
     let mut hasher = Sha256::new();
     let mut file = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT && resumed_bytes > 0
     {
@@ -194,4 +211,36 @@ pub async fn download_file(
 
     let checksum = format!("{:x}", hasher.finalize());
     Ok(checksum)
+}
+
+/// Parse the start offset from a `Content-Range` header value like
+/// `bytes 100-999/1000`. Returns `None` for unsatisfiable (`bytes */1000`)
+/// or malformed values.
+fn content_range_start(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .strip_prefix("bytes ")?
+        .split('-')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_range_start_parses_valid_headers() {
+        assert_eq!(content_range_start("bytes 100-999/1000"), Some(100));
+        assert_eq!(content_range_start("bytes 0-0/1"), Some(0));
+    }
+
+    #[test]
+    fn content_range_start_rejects_malformed_headers() {
+        assert_eq!(content_range_start("bytes */1000"), None);
+        assert_eq!(content_range_start("items 100-999/1000"), None);
+        assert_eq!(content_range_start(""), None);
+    }
 }
