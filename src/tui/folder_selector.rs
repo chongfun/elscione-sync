@@ -245,6 +245,48 @@ fn render_ui(f: &mut Frame, app: &App) {
     f.render_widget(status, chunks[2]);
 }
 
+/// Drive the selector until the user confirms (`Some(nodes)`) or cancels (`None`).
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<Option<Vec<FolderNode>>> {
+    loop {
+        terminal.draw(|f| render_ui(f, app))?;
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        return Ok(None);
+                    }
+                    KeyCode::Enter => {
+                        return Ok(Some(app.nodes.clone()));
+                    }
+                    KeyCode::Char(' ') => {
+                        app.toggle_selected();
+                    }
+                    KeyCode::Char('a') => {
+                        app.select_all(true);
+                    }
+                    KeyCode::Char('n') => {
+                        app.select_all(false);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.move_up();
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.move_down();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Run the interactive TUI folder selector.
 pub async fn run(config: &Config, db: &Db) -> Result<()> {
     // Fetch top-level folders — print progress before entering raw mode.
@@ -283,44 +325,9 @@ pub async fn run(config: &Config, db: &Db) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Event loop — break out with the result instead of returning from a closure.
-    let result: Result<Option<Vec<FolderNode>>> = 'event_loop: {
-        loop {
-            terminal.draw(|f| render_ui(f, &app))?;
-
-            if event::poll(std::time::Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            break 'event_loop Ok(None);
-                        }
-                        KeyCode::Enter => {
-                            break 'event_loop Ok(Some(app.nodes.clone()));
-                        }
-                        KeyCode::Char(' ') => {
-                            app.toggle_selected();
-                        }
-                        KeyCode::Char('a') => {
-                            app.select_all(true);
-                        }
-                        KeyCode::Char('n') => {
-                            app.select_all(false);
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            app.move_up();
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            app.move_down();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    };
+    // Run the event loop in a helper so any error still reaches the terminal
+    // cleanup below instead of leaving raw mode / the alternate screen active.
+    let result = event_loop(&mut terminal, &mut app);
 
     // Restore terminal regardless of outcome.
     disable_raw_mode()?;
