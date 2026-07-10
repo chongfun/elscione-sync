@@ -158,9 +158,16 @@ pub async fn download_file(
             p.inc(len);
         }
         if let (Some(o), Some(rem)) = (progress.overall, &progress.remaining_bytes) {
-            let current_rem = rem
-                .fetch_sub(len, std::sync::atomic::Ordering::Relaxed)
-                .saturating_sub(len);
+            // Saturate at zero: files with unknown size contribute nothing to the
+            // initial total, so a plain fetch_sub could wrap the counter around.
+            let prev = rem
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |v| Some(v.saturating_sub(len)),
+                )
+                .unwrap_or(0);
+            let current_rem = prev.saturating_sub(len);
             o.set_message(format!("{} remaining", bytesize::ByteSize(current_rem)));
         }
     }
