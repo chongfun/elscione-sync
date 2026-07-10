@@ -493,4 +493,53 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn h5ai_response_parses_files_and_directories() {
+        let json = serde_json::json!({
+            "items": [
+                { "href": "/" },
+                { "href": "/Books/", "time": 0 },
+                { "href": "/Books/example.epub", "time": 60_000, "size": 12345 },
+                { "not_href": true },
+            ]
+        });
+
+        let entries = parse_h5ai_response(&json, "https://example.test", "/").unwrap();
+
+        assert_eq!(entries.len(), 2);
+
+        let dir = &entries[0];
+        assert!(dir.is_dir);
+        assert_eq!(dir.name, "Books");
+        assert_eq!(dir.url, "https://example.test/Books/");
+        assert_eq!(dir.size_bytes, None);
+
+        let file = &entries[1];
+        assert!(!file.is_dir);
+        assert_eq!(file.name, "example.epub");
+        assert_eq!(file.url, "https://example.test/Books/example.epub");
+        assert_eq!(file.size_bytes, Some(12345));
+        assert_eq!(file.last_modified.as_deref(), Some("1970-01-01 00:01"));
+    }
+
+    #[test]
+    fn extract_clckd_finds_meta_token() {
+        let html = r#"<head><meta name="clckd" content="abc123"/></head>"#;
+
+        assert_eq!(extract_clckd(html), Some("abc123".to_owned()));
+        assert_eq!(extract_clckd("<html></html>"), None);
+    }
+
+    #[test]
+    fn url_to_path_strips_base_url() {
+        assert_eq!(
+            url_to_path("https://example.test/Books/a.epub", "https://example.test/"),
+            "/Books/a.epub"
+        );
+        assert_eq!(
+            url_to_path("https://other.test/x", "https://example.test/"),
+            "https://other.test/x"
+        );
+    }
 }
