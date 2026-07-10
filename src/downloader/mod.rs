@@ -46,11 +46,7 @@ pub async fn run(
     {
         let (pending_count, pending_bytes) = crate::db::run_blocking(db, |conn| {
             let pending_bytes = models::pending_bytes(conn)?;
-            let pending_count = conn.query_row(
-                "SELECT COUNT(*) FROM files WHERE status='pending'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )?;
+            let pending_count = models::pending_count(conn)?;
             Ok((pending_count, pending_bytes))
         })
         .await?;
@@ -120,16 +116,8 @@ pub async fn run(
         if pending.is_empty() {
             // Check if there are any pending files left in the DB. If we skipped the whole
             // batch, we should fetch the next batch. If there are truly no pending files, break.
-            let count = crate::db::run_blocking(db, |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM files WHERE status='pending'",
-                        [],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .unwrap_or(0))
-            })
-            .await?;
+            let count =
+                crate::db::run_blocking(db, |conn| Ok(models::pending_count(conn)?)).await?;
             if count == 0 {
                 break;
             } else {
@@ -469,10 +457,8 @@ pub async fn run(
         overall.finish_and_clear();
 
         // Check if any new pending files appeared during this batch (from a concurrent crawl).
-        let remaining = crate::db::run_blocking(db, |conn| {
-            Ok(models::files_by_status(conn, "pending")?.len())
-        })
-        .await?;
+        let remaining =
+            crate::db::run_blocking(db, |conn| Ok(models::pending_count(conn)?)).await?;
         if remaining == 0 {
             break;
         }

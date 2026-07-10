@@ -133,6 +133,15 @@ pub fn status_counts(conn: &Connection) -> SqlResult<Vec<(String, i64)>> {
     rows.collect()
 }
 
+/// Number of files with status 'pending'.
+pub fn pending_count(conn: &Connection) -> SqlResult<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE status='pending'",
+        [],
+        |row| row.get(0),
+    )
+}
+
 /// Sum of size_bytes for pending + downloading files.
 pub fn pending_bytes(conn: &Connection) -> SqlResult<i64> {
     conn.query_row(
