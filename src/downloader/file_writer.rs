@@ -21,6 +21,18 @@ pub struct DownloadProgress<'a> {
     pub remaining_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
+/// Path of the `.part` temp file used while downloading `dest_path`.
+pub fn part_path_for(dest_path: &Path) -> PathBuf {
+    let mut p = dest_path.to_path_buf();
+    let name = p
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    p.set_file_name(format!("{name}.part"));
+    p
+}
+
 /// Download `url` to `dest_path`, writing via a `.part` temp file and atomically
 /// renaming on completion.
 ///
@@ -42,16 +54,7 @@ pub async fn download_file(
         fs::create_dir_all(parent).await?;
     }
 
-    let part_path: PathBuf = {
-        let mut p = dest_path.to_path_buf();
-        let name = p
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        p.set_file_name(format!("{name}.part"));
-        p
-    };
+    let part_path: PathBuf = part_path_for(dest_path);
 
     let mut resumed_bytes = 0;
     if part_path.exists() {

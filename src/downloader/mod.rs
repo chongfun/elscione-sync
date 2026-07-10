@@ -129,13 +129,7 @@ pub async fn run(
                     let rel = record.remote_path.trim_start_matches('/');
                     output_dir.join(rel)
                 };
-                let mut part_path = dest_path.clone();
-                let name = part_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                part_path.set_file_name(format!("{name}.part"));
+                let part_path = file_writer::part_path_for(&dest_path);
 
                 if part_path.exists() {
                     if let Ok(meta) = std::fs::metadata(&part_path) {
