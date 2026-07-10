@@ -273,6 +273,14 @@ pub fn mark_crawl_done(conn: &Connection, id: i64) -> SqlResult<()> {
     Ok(())
 }
 
+pub fn mark_crawl_error(conn: &Connection, id: i64) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE crawl_queue SET status='error' WHERE id=?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
 pub fn has_pending_crawl(conn: &Connection) -> SqlResult<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM crawl_queue WHERE status='pending'",

@@ -256,11 +256,7 @@ pub async fn run(
                     warn!("Failed to fetch {url}: {e}");
                     let db_clone = db.clone();
                     crate::db::run_blocking(&db_clone, move |conn| {
-                        conn.execute(
-                            "UPDATE crawl_queue SET status='error' WHERE id=?1",
-                            rusqlite::params![entry_id],
-                        )?;
-                        Ok(())
+                        Ok(models::mark_crawl_error(conn, entry_id)?)
                     })
                     .await?;
                 }
