@@ -125,7 +125,10 @@ pub async fn run(
                 }
             }
 
-            if is_excluded(&entry.url, &exclude_patterns) {
+            if is_excluded(
+                &url_to_path(&entry.url, &config.server.base_url),
+                &exclude_patterns,
+            ) {
                 debug!("Excluded by pattern: {}", entry.url);
                 let entry_id = entry.id;
                 crate::db::run_blocking(db, move |conn| {
@@ -213,6 +216,7 @@ pub async fn run(
                     }
 
                     let allowed_extensions = config.sync.allowed_extensions.clone();
+                    let exclude_patterns = exclude_patterns.clone();
                     let base_url = config.server.base_url.clone();
                     let db_clone = db.clone();
                     let dir_entries_clone = dir_entries.clone();
@@ -236,6 +240,10 @@ pub async fn run(
                                 }
 
                                 let remote_path = url_to_path(&de.url, &base_url);
+                                if is_excluded(&remote_path, &exclude_patterns) {
+                                    debug!("Excluded by pattern: {}", de.url);
+                                    continue;
+                                }
                                 models::upsert_file(
                                     &tx,
                                     &de.url,
@@ -475,10 +483,28 @@ fn last_segment(url: &str) -> String {
         .to_owned()
 }
 
-fn is_excluded(url: &str, patterns: &[String]) -> bool {
+/// Whether a server-relative path matches any exclude pattern.
+///
+/// Patterns containing `/` are globbed against the whole relative path
+/// (e.g. `Manga/**`); bare patterns are globbed against each path segment
+/// (e.g. `Drafts`, `*.zip`).
+fn is_excluded(rel_path: &str, patterns: &[String]) -> bool {
+    let rel = rel_path.trim_matches('/');
     patterns.iter().any(|p| {
-        let pattern = p.trim_end_matches("/**").trim_end_matches("/*");
-        url.contains(pattern)
+        let pat = p.trim_start_matches('/');
+        match glob::Pattern::new(pat) {
+            Ok(g) => {
+                if pat.contains('/') {
+                    g.matches(rel)
+                } else {
+                    rel.split('/').any(|segment| g.matches(segment))
+                }
+            }
+            Err(e) => {
+                warn!("Invalid exclude pattern {p:?} ({e}); treating as substring match");
+                rel.contains(pat)
+            }
+        }
     })
 }
 
@@ -530,6 +556,28 @@ mod tests {
 
         assert_eq!(extract_clckd(html), Some("abc123".to_owned()));
         assert_eq!(extract_clckd("<html></html>"), None);
+    }
+
+    #[test]
+    fn exclude_patterns_with_slash_glob_the_full_path() {
+        let patterns = vec!["Manga/**".to_owned()];
+
+        assert!(is_excluded("/Manga/Series", &patterns));
+        assert!(is_excluded("/Manga/Series/vol1.epub", &patterns));
+        assert!(!is_excluded("/MangaExtra/Series", &patterns));
+        assert!(!is_excluded("/Books/Manga-Guide.epub", &patterns));
+    }
+
+    #[test]
+    fn bare_exclude_patterns_glob_each_segment() {
+        let by_name = vec!["Drafts".to_owned()];
+        assert!(is_excluded("/Books/Drafts", &by_name));
+        assert!(is_excluded("/Books/Drafts/notes.txt", &by_name));
+        assert!(!is_excluded("/Books/Drafts2", &by_name));
+
+        let by_ext = vec!["*.zip".to_owned()];
+        assert!(is_excluded("/Books/archive.zip", &by_ext));
+        assert!(!is_excluded("/Books/book.epub", &by_ext));
     }
 
     #[test]

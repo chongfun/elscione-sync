@@ -47,6 +47,8 @@ filetime = "0.2"
 sha2 = "0.10"
 # Byte formatting
 bytesize = "1"
+# Exclude pattern matching
+glob = "0.3"
 # Directories (XDG config/data paths)
 directories = "5"
 
