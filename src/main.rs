@@ -32,13 +32,15 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
-    // Load config
-    let config = config::load(cli.config.as_deref())?;
-
+    // Edit-config must run before the config is parsed, so a malformed
+    // config file can still be opened and fixed.
     if !command_needs_database(&cli.command) {
         edit_config(cli.config.clone())?;
         return Ok(());
     }
+
+    // Load config
+    let config = config::load(cli.config.as_deref())?;
 
     // Open DB
     let db_path = config::db_path_for_config(cli.config.as_deref());
