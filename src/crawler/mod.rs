@@ -105,10 +105,11 @@ pub async fn run(
             }
             visited.insert(entry.url.clone());
 
-            // Apply folder filter at depth 1.
+            // Apply folder filter at depth 1. Exact name match, so selecting
+            // "Art" does not also pull in "Articles".
             if entry.depth == 1 && !include_folders.is_empty() {
                 let name = last_segment(&entry.url);
-                if !include_folders.iter().any(|f| name.contains(f.as_str())) {
+                if !include_folders.contains(&name) {
                     debug!(
                         "Skipping folder (not in selection): {} (name: {})",
                         entry.url, name
