@@ -13,6 +13,17 @@ use crate::db::{models, Db};
 
 const DOWNLOAD_BATCH_SIZE: usize = 128;
 
+/// Whether a remote URL's file extension is in the allowed list (case-insensitive).
+fn extension_allowed(remote_url: &str, allowed_extensions: &[String]) -> bool {
+    let ext = std::path::Path::new(remote_url)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    allowed_extensions
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(ext))
+}
+
 pub async fn run(
     config: &Config,
     db: &Db,
@@ -26,14 +37,7 @@ pub async fn run(
         crate::db::run_blocking(db, move |conn| {
             let pending = models::files_by_status(conn, "pending")?;
             for record in pending {
-                let ext = std::path::Path::new(&record.remote_url)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                if !allowed_extensions
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(ext))
-                {
+                if !extension_allowed(&record.remote_url, &allowed_extensions) {
                     let _ = models::set_file_status(conn, record.id, "skipped", None, None);
                 }
             }
@@ -84,15 +88,7 @@ pub async fn run(
                 let mut filtered = Vec::new();
                 let mut to_skip = Vec::new();
                 for record in pending_clone {
-                    let ext = std::path::Path::new(&record.remote_url)
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
-
-                    if allowed_extensions
-                        .iter()
-                        .any(|a| a.eq_ignore_ascii_case(ext))
-                    {
+                    if extension_allowed(&record.remote_url, &allowed_extensions) {
                         filtered.push(record);
                     } else {
                         to_skip.push(record.id);
