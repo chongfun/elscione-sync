@@ -224,19 +224,14 @@ pub async fn run(
                                 models::enqueue_crawl(&tx, &de.url, entry_depth + 1)?;
                             } else {
                                 // Apply extension filter
-                                if !allowed_extensions.is_empty() {
-                                    let ext = std::path::Path::new(&de.url)
-                                        .extension()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("");
-
-                                    if !allowed_extensions
-                                        .iter()
-                                        .any(|allowed| allowed.eq_ignore_ascii_case(ext))
-                                    {
-                                        debug!("Skipping file (extension not allowed): {}", de.url);
-                                        continue;
-                                    }
+                                if !allowed_extensions.is_empty()
+                                    && !crate::downloader::extension_allowed(
+                                        &de.url,
+                                        &allowed_extensions,
+                                    )
+                                {
+                                    debug!("Skipping file (extension not allowed): {}", de.url);
+                                    continue;
                                 }
 
                                 let remote_path = url_to_path(&de.url, &base_url);

@@ -14,7 +14,7 @@ use crate::db::{models, Db};
 const DOWNLOAD_BATCH_SIZE: usize = 128;
 
 /// Whether a remote URL's file extension is in the allowed list (case-insensitive).
-fn extension_allowed(remote_url: &str, allowed_extensions: &[String]) -> bool {
+pub fn extension_allowed(remote_url: &str, allowed_extensions: &[String]) -> bool {
     let ext = std::path::Path::new(remote_url)
         .extension()
         .and_then(|s| s.to_str())
