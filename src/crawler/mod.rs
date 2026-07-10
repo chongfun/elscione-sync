@@ -400,6 +400,7 @@ fn parse_h5ai_response(
 
     let mut entries = Vec::new();
     let current = current_href.trim_end_matches('/');
+    let parsed_base = reqwest::Url::parse(base_url).ok();
 
     for item in items {
         let Some(href) = item.get("href").and_then(|href| href.as_str()) else {
@@ -414,32 +415,23 @@ fn parse_h5ai_response(
         }
 
         let is_dir = href.ends_with('/');
-        let name = href
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .to_owned();
+        let name = last_segment(href);
 
         if name.is_empty() {
             continue;
         }
 
-        let url = match reqwest::Url::parse(base_url) {
-            Ok(base) => match base.join(href) {
-                Ok(joined) => joined.to_string(),
-                Err(_) => format!(
+        let url = parsed_base
+            .as_ref()
+            .and_then(|base| base.join(href).ok())
+            .map(|joined| joined.to_string())
+            .unwrap_or_else(|| {
+                format!(
                     "{}/{}",
                     base_url.trim_end_matches('/'),
                     href.trim_start_matches('/')
-                ),
-            },
-            Err(_) => format!(
-                "{}/{}",
-                base_url.trim_end_matches('/'),
-                href.trim_start_matches('/')
-            ),
-        };
+                )
+            });
 
         // h5ai provides timestamps in milliseconds since epoch.
         let last_modified = item
