@@ -722,55 +722,109 @@ mod tests {
 
     #[tokio::test]
     async fn test_downloader_403_triggers_single_flight_session_refresh() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
         let mock_server = wiremock::MockServer::start().await;
 
-        // Initial base URL probe for session setup
+        // ------------------------------------------------------------------
+        // Clearance probe endpoint: counts how many times it's hit.
+        // The epoch-based single-flight logic should ensure this is exactly 1.
+        // ------------------------------------------------------------------
+        let refresh_count = Arc::new(AtomicU32::new(0));
+        let refresh_count_clone = refresh_count.clone();
+
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/"))
-            .respond_with(
+            .respond_with(move |_: &wiremock::Request| {
+                refresh_count_clone.fetch_add(1, Ordering::SeqCst);
                 wiremock::ResponseTemplate::new(200)
-                    .append_header("Set-Cookie", "cf_clearance=refreshed_clearance_789; Path=/")
-                    .set_body_string("<html><head><title>Index</title></head><body>Index</body></html>"),
-            )
+                    .append_header(
+                        "Set-Cookie",
+                        "cf_clearance=refreshed_clearance_789; Path=/",
+                    )
+                    .set_body_string(
+                        "<html><head><title>Index</title></head><body>Index</body></html>",
+                    )
+            })
             .mount(&mock_server)
             .await;
 
-        // First attempt without fresh cookie returns 403 Forbidden
+        // ------------------------------------------------------------------
+        // First attempt for BOTH files returns 403 (one each).
+        // Delay the second file's 403 so it is received after worker A has
+        // already refreshed the clearance, exercising the interleaving:
+        //   worker A captures epoch 0 → GET file1 → 403
+        //   worker B captures epoch 0 → GET file2 → 403 (delayed)
+        //   worker A refreshes epoch 0 → 1
+        //   worker B enters refresh_clearance_if_epoch(observed=0), sees 1>0, skips
+        // ------------------------------------------------------------------
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/file1.epub"))
             .respond_with(wiremock::ResponseTemplate::new(403))
             .up_to_n_times(1)
+            .expect(1)
             .mount(&mock_server)
             .await;
 
-        // Second attempt with refreshed cookie returns 200 OK
-        let binary_payload = vec![1, 2, 3, 4, 5];
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/file2.epub"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(403)
+                    .set_delay(std::time::Duration::from_millis(200)),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        // ------------------------------------------------------------------
+        // Retry with refreshed cookie succeeds for both files.
+        // ------------------------------------------------------------------
+        let payload1 = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01];
+        let payload2 = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x02];
+
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/file1.epub"))
-            .and(wiremock::matchers::header("cookie", "cf_clearance=refreshed_clearance_789"))
+            .and(wiremock::matchers::header(
+                "cookie",
+                "cf_clearance=refreshed_clearance_789",
+            ))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_bytes(binary_payload.clone()),
+                wiremock::ResponseTemplate::new(200).set_body_bytes(payload1.clone()),
             )
             .mount(&mock_server)
             .await;
 
-        let temp_dir = std::env::temp_dir().join("elscione_test_403_refresh");
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/file2.epub"))
+            .and(wiremock::matchers::header(
+                "cookie",
+                "cf_clearance=refreshed_clearance_789",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_bytes(payload2.clone()),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // ------------------------------------------------------------------
+        // DB and filesystem setup
+        // ------------------------------------------------------------------
+        let temp_dir = std::env::temp_dir().join("elscione_test_403_single_flight");
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
         let db_path = temp_dir.join("state.db");
         let out_dir = temp_dir.join("output");
         tokio::fs::create_dir_all(&out_dir).await.unwrap();
 
         let db = crate::db::open_at(&db_path).unwrap();
-        let file_url = format!("{}/file1.epub", mock_server.uri());
+
+        // Insert two pending files.
+        let url1 = format!("{}/file1.epub", mock_server.uri());
+        let url2 = format!("{}/file2.epub", mock_server.uri());
         crate::db::run_blocking(&db, move |conn| {
-            crate::db::models::upsert_file(
-                conn,
-                &file_url,
-                "/file1.epub",
-                None,
-                Some(5),
-            )?;
+            crate::db::models::upsert_file(conn, &url1, "/file1.epub", None, Some(5))?;
+            crate::db::models::upsert_file(conn, &url2, "/file2.epub", None, Some(5))?;
             Ok(())
         })
         .await
@@ -780,24 +834,45 @@ mod tests {
         config.server.base_url = mock_server.uri();
         config.output.dir = out_dir.clone();
         config.concurrency.delay_between_requests_ms = 0;
+        config.concurrency.max_parallel_downloads = 2; // both workers run concurrently
 
-        let session = ElscioneSession::new(&mock_server.uri(), "test-ua", None).unwrap();
+        let session =
+            ElscioneSession::new(&mock_server.uri(), "test-ua", None).unwrap();
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
-        crate::downloader::run(&config, &session, &db, false, cancel_token).await.unwrap();
+        crate::downloader::run(&config, &session, &db, false, cancel_token)
+            .await
+            .unwrap();
 
-        let status = crate::db::run_blocking(&db, |conn| {
+        // ------------------------------------------------------------------
+        // Assertions
+        // ------------------------------------------------------------------
+
+        // 1. Both files finished successfully.
+        let done_files = crate::db::run_blocking(&db, |conn| {
             let files = crate::db::models::files_by_status(conn, "done")?;
             Ok(files)
         })
         .await
         .unwrap();
+        assert_eq!(done_files.len(), 2, "both files should be status=done");
 
-        assert_eq!(status.len(), 1);
-        assert_eq!(status[0].remote_path, "/file1.epub");
+        let paths: Vec<&str> = done_files.iter().map(|f| f.remote_path.as_str()).collect();
+        assert!(paths.contains(&"/file1.epub"));
+        assert!(paths.contains(&"/file2.epub"));
 
-        let data = tokio::fs::read(out_dir.join("file1.epub")).await.unwrap();
-        assert_eq!(data, binary_payload);
+        // 2. Both files have correct bytes on disk.
+        let data1 = tokio::fs::read(out_dir.join("file1.epub")).await.unwrap();
+        assert_eq!(data1, payload1, "file1 bytes mismatch");
+        let data2 = tokio::fs::read(out_dir.join("file2.epub")).await.unwrap();
+        assert_eq!(data2, payload2, "file2 bytes mismatch");
+
+        // 3. The clearance endpoint was hit exactly once (single-flight).
+        assert_eq!(
+            refresh_count.load(Ordering::SeqCst),
+            1,
+            "clearance refresh should have been called exactly once, not once per worker"
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

@@ -316,6 +316,13 @@ pub async fn run(
                         return;
                     }
 
+                    // Capture the clearance epoch BEFORE sending the request.
+                    // If this request gets a 403, we pass the pre-request epoch to
+                    // refresh_clearance_if_epoch so that a concurrent worker whose
+                    // 403 was also caused by this same stale epoch will see the
+                    // already-advanced epoch and skip the redundant refresh.
+                    let request_epoch = session.clearance_epoch();
+
                     let download_fut = file_writer::download_file(
                         &http_client,
                         file_writer::DownloadRequest {
@@ -402,9 +409,8 @@ pub async fn run(
                                                 "  ⚠ {} (HTTP 403 Forbidden): refreshing Cloudflare clearance session...",
                                                 file_name
                                             ));
-                                            let observed_epoch = session.clearance_epoch();
                                             let refresh_res = tokio::select! {
-                                                res = session.refresh_clearance_if_epoch(&base_url, observed_epoch) => res,
+                                                res = session.refresh_clearance_if_epoch(&base_url, request_epoch) => res,
                                                 _ = cancel_token.cancelled() => Err(anyhow::anyhow!("Interrupted by user cancellation")),
                                             };
                                             match refresh_res {
