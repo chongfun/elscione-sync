@@ -638,7 +638,6 @@ mod tests {
         let checksum = crate::downloader::file_writer::download_file(
             session.http_client(),
             crate::downloader::file_writer::DownloadRequest {
-                cookie: None,
                 url: &format!("{}/download.bin", mock_server.uri()),
                 dest_path: &dest,
                 last_modified: None,
@@ -652,6 +651,153 @@ mod tests {
         let data = tokio::fs::read(&dest).await.unwrap();
         assert_eq!(data, binary_payload);
         assert!(!checksum.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_stale_configured_cookie_overwritten_by_challenge_in_download() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        // Challenge probe endpoint replaces the stale cookie with a fresh one
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/probe"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .append_header("Set-Cookie", "cf_clearance=FRESH_COOKIE_456; Path=/")
+                    .set_body_string("<html><head><title>OK</title></head><body>Probe OK</body></html>"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Binary download REQUIRES the FRESH cookie; sending the STALE cookie would fail
+        let binary_payload = vec![0xCA, 0xFE, 0xBA, 0xBE];
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/book.epub"))
+            .and(wiremock::matchers::header("cookie", "cf_clearance=FRESH_COOKIE_456"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(binary_payload.clone()),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Session starts with a configured stale cookie
+        let session = ElscioneSession::new(
+            &mock_server.uri(),
+            "test-ua",
+            Some("cf_clearance=STALE_COOKIE_123"),
+        )
+        .unwrap();
+
+        // Ensure cleared updates the jar with the fresh cookie
+        session
+            .ensure_cleared(&format!("{}/probe", mock_server.uri()))
+            .await
+            .unwrap();
+
+        let temp_dir = std::env::temp_dir().join("elscione_test_stale_cookie_refresh");
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let dest = temp_dir.join("book.epub");
+
+        let checksum = crate::downloader::file_writer::download_file(
+            session.http_client(),
+            crate::downloader::file_writer::DownloadRequest {
+                url: &format!("{}/book.epub", mock_server.uri()),
+                dest_path: &dest,
+                last_modified: None,
+            },
+            crate::downloader::file_writer::DownloadProgress::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let data = tokio::fs::read(&dest).await.unwrap();
+        assert_eq!(data, binary_payload);
+        assert!(!checksum.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_downloader_403_triggers_single_flight_session_refresh() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        // Initial base URL probe for session setup
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .append_header("Set-Cookie", "cf_clearance=refreshed_clearance_789; Path=/")
+                    .set_body_string("<html><head><title>Index</title></head><body>Index</body></html>"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // First attempt without fresh cookie returns 403 Forbidden
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/file1.epub"))
+            .respond_with(wiremock::ResponseTemplate::new(403))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+
+        // Second attempt with refreshed cookie returns 200 OK
+        let binary_payload = vec![1, 2, 3, 4, 5];
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/file1.epub"))
+            .and(wiremock::matchers::header("cookie", "cf_clearance=refreshed_clearance_789"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(binary_payload.clone()),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = std::env::temp_dir().join("elscione_test_403_refresh");
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let db_path = temp_dir.join("state.db");
+        let out_dir = temp_dir.join("output");
+        tokio::fs::create_dir_all(&out_dir).await.unwrap();
+
+        let db = crate::db::open_at(&db_path).unwrap();
+        let file_url = format!("{}/file1.epub", mock_server.uri());
+        crate::db::run_blocking(&db, move |conn| {
+            crate::db::models::upsert_file(
+                conn,
+                &file_url,
+                "/file1.epub",
+                None,
+                Some(5),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let mut config = crate::config::Config::default();
+        config.server.base_url = mock_server.uri();
+        config.output.dir = out_dir.clone();
+        config.concurrency.delay_between_requests_ms = 0;
+
+        let session = ElscioneSession::new(&mock_server.uri(), "test-ua", None).unwrap();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+
+        crate::downloader::run(&config, &session, &db, false, cancel_token).await.unwrap();
+
+        let status = crate::db::run_blocking(&db, |conn| {
+            let files = crate::db::models::files_by_status(conn, "done")?;
+            Ok(files)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].remote_path, "/file1.epub");
+
+        let data = tokio::fs::read(out_dir.join("file1.epub")).await.unwrap();
+        assert_eq!(data, binary_payload);
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

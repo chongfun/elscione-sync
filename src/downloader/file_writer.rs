@@ -23,7 +23,6 @@ pub enum DownloadError {
 }
 
 pub struct DownloadRequest<'a> {
-    pub cookie: Option<&'a str>,
     pub url: &'a str,
     pub dest_path: &'a Path,
     pub last_modified: Option<&'a str>,
@@ -82,7 +81,6 @@ pub async fn download_file(
     limiter: Option<&crate::crawler::rate_limiter::RateLimiter>,
 ) -> Result<String, DownloadError> {
     let DownloadRequest {
-        cookie,
         url,
         dest_path,
         last_modified,
@@ -112,9 +110,6 @@ pub async fn download_file(
             format!("bytes={}-", resumed_bytes),
         );
     }
-    if let Some(cookie_str) = cookie {
-        req = req.header(reqwest::header::COOKIE, cookie_str);
-    }
 
     let mut response = req
         .send()
@@ -130,10 +125,7 @@ pub async fn download_file(
         if let Some(lim) = limiter {
             lim.wait().await;
         }
-        let mut retry_req = client.get(url);
-        if let Some(cookie_str) = cookie {
-            retry_req = retry_req.header(reqwest::header::COOKIE, cookie_str);
-        }
+        let retry_req = client.get(url);
         response = retry_req
             .send()
             .await
@@ -319,7 +311,6 @@ mod tests {
         let checksum = download_file(
             &client,
             DownloadRequest {
-                cookie: None,
                 url: &format!("{}/test.bin", mock_server.uri()),
                 dest_path: &dest_path,
                 last_modified: None,
@@ -353,7 +344,6 @@ mod tests {
         let res = download_file(
             &client,
             DownloadRequest {
-                cookie: None,
                 url: &format!("{}/missing.bin", mock_server.uri()),
                 dest_path: &dest_path,
                 last_modified: None,
@@ -390,7 +380,6 @@ mod tests {
         let res = download_file(
             &client,
             DownloadRequest {
-                cookie: None,
                 url: &format!("{}/rate_limited.bin", mock_server.uri()),
                 dest_path: &dest_path,
                 last_modified: None,

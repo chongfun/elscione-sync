@@ -188,7 +188,8 @@ pub async fn run(
             }
 
             let http_client = session.http_client().clone();
-            let cookie_str = config.server.cookie.clone();
+            let session = session.clone();
+            let base_url = config.server.base_url.clone();
             let limiter = limiter.clone();
             let db = db.clone();
             let output_dir = output_dir.clone();
@@ -292,6 +293,7 @@ pub async fn run(
                 let mut backoff = backoff_initial;
                 let mut attempts = 0;
                 let max_attempts = 5;
+                let mut forbidden_retried = false;
 
                 loop {
                     attempts += 1;
@@ -317,7 +319,6 @@ pub async fn run(
                     let download_fut = file_writer::download_file(
                         &http_client,
                         file_writer::DownloadRequest {
-                            cookie: cookie_str.as_deref(),
                             url: &record.remote_url,
                             dest_path: &dest_path,
                             last_modified: record.last_modified.as_deref(),
@@ -395,19 +396,52 @@ pub async fn run(
                                         .await;
                                         break;
                                     } else if status == reqwest::StatusCode::FORBIDDEN {
-                                        pb.finish_and_clear();
-                                        multi.remove(&pb);
-                                        let _ = multi.println(format!(
-                                            "  ✗ {} (HTTP 403 Forbidden): session/clearance rejected; stopping retries",
-                                            record.remote_path
-                                        ));
-                                        let record_id = record.id;
-                                        let err_msg = "HTTP 403 Forbidden".to_string();
-                                        let _ = crate::db::run_blocking(&db, move |conn| {
-                                            Ok(models::record_error(conn, record_id, &err_msg)?)
-                                        })
-                                        .await;
-                                        break;
+                                        if !forbidden_retried {
+                                            forbidden_retried = true;
+                                            let _ = multi.println(format!(
+                                                "  ⚠ {} (HTTP 403 Forbidden): refreshing Cloudflare clearance session...",
+                                                file_name
+                                            ));
+                                            let observed_epoch = session.clearance_epoch();
+                                            let refresh_res = tokio::select! {
+                                                res = session.refresh_clearance_if_epoch(&base_url, observed_epoch) => res,
+                                                _ = cancel_token.cancelled() => Err(anyhow::anyhow!("Interrupted by user cancellation")),
+                                            };
+                                            match refresh_res {
+                                                Ok(()) => {
+                                                    continue;
+                                                }
+                                                Err(e) => {
+                                                    pb.finish_and_clear();
+                                                    multi.remove(&pb);
+                                                    let _ = multi.println(format!(
+                                                        "  ✗ {} (HTTP 403 Forbidden): session refresh failed ({e}); stopping retries",
+                                                        record.remote_path
+                                                    ));
+                                                    let record_id = record.id;
+                                                    let err_msg = format!("HTTP 403 Forbidden (refresh failed: {e})");
+                                                    let _ = crate::db::run_blocking(&db, move |conn| {
+                                                        Ok(models::record_error(conn, record_id, &err_msg)?)
+                                                    })
+                                                    .await;
+                                                    break;
+                                                }
+                                            }
+                                        } else {
+                                            pb.finish_and_clear();
+                                            multi.remove(&pb);
+                                            let _ = multi.println(format!(
+                                                "  ✗ {} (HTTP 403 Forbidden): clearance rejected even after session refresh; stopping retries",
+                                                record.remote_path
+                                            ));
+                                            let record_id = record.id;
+                                            let err_msg = "HTTP 403 Forbidden".to_string();
+                                            let _ = crate::db::run_blocking(&db, move |conn| {
+                                                Ok(models::record_error(conn, record_id, &err_msg)?)
+                                            })
+                                            .await;
+                                            break;
+                                        }
                                     } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                                         let wait_secs = match retry_after {
                                             Some(dur) => dur.as_secs().max(1),

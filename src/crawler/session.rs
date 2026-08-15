@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::debug;
 
 /// Long-lived session manager for all HTTP interactions with server.elscione.com.
 ///
-/// Ensures a shared cookie jar and client identity across directory crawling and file downloads,
+/// Ensures a single shared cookie jar across directory crawling and file downloads,
 /// while keeping challenge-aware handling separate from binary streaming.
 #[derive(Clone)]
 pub struct ElscioneSession {
@@ -14,7 +15,8 @@ pub struct ElscioneSession {
     cookie_jar: Arc<reqwest::cookie::Jar>,
     http_client: reqwest::Client,
     ghostwire_client: Arc<Mutex<ghostwire::Ghostwire>>,
-    cookie_header: Option<String>,
+    clearance_epoch: Arc<AtomicU64>,
+    refresh_lock: Arc<Mutex<()>>,
 }
 
 impl ElscioneSession {
@@ -25,6 +27,9 @@ impl ElscioneSession {
 
         let cookie_jar = Arc::new(reqwest::cookie::Jar::default());
 
+        // Seed manual cookies directly into the shared cookie jar.
+        // reqwest and Ghostwire will read and update this jar exclusively,
+        // preventing stale manual Cookie headers from overriding dynamic challenge tokens.
         if let Some(cookie_str) = cookie_opt {
             for part in cookie_str.split(';') {
                 let trimmed = part.trim();
@@ -82,7 +87,8 @@ impl ElscioneSession {
             cookie_jar,
             http_client,
             ghostwire_client: Arc::new(Mutex::new(gw)),
-            cookie_header: cookie_opt.map(|s| s.to_string()),
+            clearance_epoch: Arc::new(AtomicU64::new(0)),
+            refresh_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -105,6 +111,11 @@ impl ElscioneSession {
         &self.cookie_jar
     }
 
+    /// Current clearance generation epoch.
+    pub fn clearance_epoch(&self) -> u64 {
+        self.clearance_epoch.load(Ordering::SeqCst)
+    }
+
     /// Ingest `Set-Cookie` headers into the shared cookie jar, logging only cookie names to prevent token leaks.
     pub fn sync_cookies_from_headers(&self, headers: &reqwest::header::HeaderMap, url: &reqwest::Url) {
         for cookie_val in headers.get_all(reqwest::header::SET_COOKIE) {
@@ -117,30 +128,44 @@ impl ElscioneSession {
         }
     }
 
-    /// Perform an initial challenge-aware probe to verify access and establish clearance cookies.
+    /// Single-flight clearance refresh.
     ///
-    /// Essential before binary downloads begin (particularly for `--resume` which skips crawling).
-    pub async fn ensure_cleared(&self, base_url_str: &str) -> Result<()> {
+    /// If multiple download workers receive HTTP 403 simultaneously at `observed_epoch`,
+    /// only the first worker executes the challenge probe; subsequent workers notice the advanced
+    /// epoch and return immediately without duplicate challenge solving.
+    pub async fn refresh_clearance_if_epoch(&self, base_url_str: &str, observed_epoch: u64) -> Result<()> {
+        let _guard = self.refresh_lock.lock().await;
+        let current_epoch = self.clearance_epoch.load(Ordering::SeqCst);
+        if current_epoch > observed_epoch {
+            debug!(
+                "Session clearance already refreshed by another worker (epoch {current_epoch} > {observed_epoch})"
+            );
+            return Ok(());
+        }
+
         let (status, _headers, html) = self.get_html(base_url_str).await?;
         if !status.is_success() {
             let title = crate::crawler::parser::extract_title(&html);
             anyhow::bail!(
-                "Initial session clearance probe returned HTTP {status} (title: {title:?}). Server may require manual cookies or have blocked automated access."
+                "Clearance refresh probe returned HTTP {status} (title: {title:?}). Server may require manual cookies or have blocked automated access."
             );
         }
+
+        self.clearance_epoch.fetch_add(1, Ordering::SeqCst);
+        debug!("Session clearance refreshed successfully (new epoch: {})", current_epoch + 1);
         Ok(())
+    }
+
+    /// Perform an initial challenge-aware probe to verify access and establish clearance cookies.
+    ///
+    /// Essential before binary downloads begin (particularly for `--resume` which skips crawling).
+    pub async fn ensure_cleared(&self, base_url_str: &str) -> Result<()> {
+        self.refresh_clearance_if_epoch(base_url_str, self.clearance_epoch()).await
     }
 
     /// Perform a GET request for an HTML page, extracting any session cookies set by the server.
     pub async fn get_html(&self, url: &str) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, String)> {
-        let mut opts = ghostwire::RequestOptions::default();
-        if let Some(cookie_str) = &self.cookie_header {
-            if let Ok(val) = reqwest::header::HeaderValue::from_str(cookie_str) {
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(reqwest::header::COOKIE, val);
-                opts.headers = Some(headers);
-            }
-        }
+        let opts = ghostwire::RequestOptions::default();
 
         let mut gw = self.ghostwire_client.lock().await;
         let resp = gw
@@ -175,12 +200,6 @@ impl ElscioneSession {
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("application/json;charset=utf-8"),
         );
-
-        if let Some(cookie_str) = &self.cookie_header {
-            if let Ok(val) = reqwest::header::HeaderValue::from_str(cookie_str) {
-                headers.insert(reqwest::header::COOKIE, val);
-            }
-        }
 
         if let Some(extra) = extra_headers {
             for (k, v) in extra {
