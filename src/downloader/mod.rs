@@ -27,6 +27,7 @@ pub fn extension_allowed(remote_url: &str, allowed_extensions: &[String]) -> boo
 
 pub async fn run(
     config: &Config,
+    session: &ElscioneSession,
     db: &Db,
     dry_run: bool,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -62,11 +63,6 @@ pub async fn run(
         );
     }
 
-    let session = ElscioneSession::new(
-        &config.server.base_url,
-        &config.server.user_agent,
-        config.server.cookie.as_deref(),
-    )?;
     let limiter = RateLimiter::new(config.concurrency.delay_between_requests_ms);
     let semaphore = Arc::new(Semaphore::new(config.concurrency.max_parallel_downloads));
     let multi = MultiProgress::new();
@@ -331,6 +327,7 @@ pub async fn run(
                             overall: Some(&overall),
                             remaining_bytes: Some(remaining_bytes.clone()),
                         },
+                        Some(&limiter),
                     );
 
                     let result = tokio::select! {
@@ -412,11 +409,10 @@ pub async fn run(
                                         .await;
                                         break;
                                     } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                                        let wait_dur = retry_after.unwrap_or_else(|| {
-                                            std::time::Duration::from_secs(backoff)
-                                        });
-                                        let wait_secs =
-                                            wait_dur.as_secs().max(1).min(backoff_max);
+                                        let wait_secs = match retry_after {
+                                            Some(dur) => dur.as_secs().max(1),
+                                            None => backoff.min(backoff_max),
+                                        };
                                         let _ = multi.println(format!(
                                             "  ⚠ {} rate limited (HTTP 429). Retrying in {}s...",
                                             file_name, wait_secs

@@ -65,7 +65,12 @@ async fn main() -> Result<()> {
             sync::run(config, db, opts, cancel_token).await?;
         }
         Some(Commands::Select) => {
-            tui::run_folder_selector(&config, &db).await?;
+            let session = crawler::session::ElscioneSession::new(
+                &config.server.base_url,
+                &config.server.user_agent,
+                config.server.cookie.as_deref(),
+            )?;
+            tui::run_folder_selector(&config, &session, &db).await?;
         }
         Some(Commands::Status) => {
             sync::print_status(&db).await?;

@@ -145,13 +145,19 @@ fn parse_tag_attributes(body: &str) -> Vec<(String, String)> {
 
 fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
     let needle_lower = needle.to_ascii_lowercase();
-    let needle_len = needle.len();
-    if haystack.len() < needle_len {
+    let needle_bytes = needle_lower.as_bytes();
+    let haystack_bytes = haystack.as_bytes();
+    let n = needle_bytes.len();
+
+    if haystack_bytes.len() < n {
         return None;
     }
-    for i in 0..=haystack.len() - needle_len {
-        if haystack[i..i + needle_len].eq_ignore_ascii_case(&needle_lower) {
-            return Some(i);
+
+    for (byte_idx, _) in haystack.char_indices() {
+        if byte_idx + n <= haystack_bytes.len() {
+            if haystack_bytes[byte_idx..byte_idx + n].eq_ignore_ascii_case(needle_bytes) {
+                return Some(byte_idx);
+            }
         }
     }
     None
@@ -165,6 +171,12 @@ mod tests {
     fn test_extract_clckd_standard() {
         let html = r#"<head><meta name="clckd" content="abc123"/></head>"#;
         assert_eq!(extract_clckd(html), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_extract_clckd_with_multibyte_utf8_prefix() {
+        let html = r#"<!DOCTYPE html><html><head><title>日本語のタイトル - 魔法少女</title><meta name="author" content="作家"><meta name="clckd" content="utf8_safe_token"></head></html>"#;
+        assert_eq!(extract_clckd(html), Some("utf8_safe_token".to_string()));
     }
 
     #[test]

@@ -63,6 +63,7 @@ impl ElscioneSession {
 
         let gw = ghostwire::Ghostwire::builder()
             .user_agent_opts(user_agent_opts)
+            .cookie_provider(cookie_jar.clone())
             .min_request_interval_secs(0.0)
             .auto_refresh_on_403(false) // Handle 403 explicitly in application logic
             .stealth(ghostwire::StealthConfig {
@@ -104,14 +105,30 @@ impl ElscioneSession {
         &self.cookie_jar
     }
 
-    /// Ingest `Set-Cookie` headers into the shared cookie jar.
+    /// Ingest `Set-Cookie` headers into the shared cookie jar, logging only cookie names to prevent token leaks.
     pub fn sync_cookies_from_headers(&self, headers: &reqwest::header::HeaderMap, url: &reqwest::Url) {
         for cookie_val in headers.get_all(reqwest::header::SET_COOKIE) {
             if let Ok(cookie_str) = cookie_val.to_str() {
-                debug!("Syncing cookie into session: {}", cookie_str);
+                if let Some(name) = cookie_str.split('=').next() {
+                    debug!("Syncing cookie into session: {}", name.trim());
+                }
                 self.cookie_jar.add_cookie_str(cookie_str, url);
             }
         }
+    }
+
+    /// Perform an initial challenge-aware probe to verify access and establish clearance cookies.
+    ///
+    /// Essential before binary downloads begin (particularly for `--resume` which skips crawling).
+    pub async fn ensure_cleared(&self, base_url_str: &str) -> Result<()> {
+        let (status, _headers, html) = self.get_html(base_url_str).await?;
+        if !status.is_success() {
+            let title = crate::crawler::parser::extract_title(&html);
+            anyhow::bail!(
+                "Initial session clearance probe returned HTTP {status} (title: {title:?}). Server may require manual cookies or have blocked automated access."
+            );
+        }
+        Ok(())
     }
 
     /// Perform a GET request for an HTML page, extracting any session cookies set by the server.

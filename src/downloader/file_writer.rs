@@ -79,6 +79,7 @@ pub async fn download_file(
     client: &reqwest::Client,
     request: DownloadRequest<'_>,
     progress: DownloadProgress<'_>,
+    limiter: Option<&crate::crawler::rate_limiter::RateLimiter>,
 ) -> Result<String, DownloadError> {
     let DownloadRequest {
         cookie,
@@ -125,6 +126,9 @@ pub async fn download_file(
         resumed_bytes = 0;
         if part_path.exists() {
             let _ = fs::remove_file(&part_path).await;
+        }
+        if let Some(lim) = limiter {
+            lim.wait().await;
         }
         let mut retry_req = client.get(url);
         if let Some(cookie_str) = cookie {
@@ -321,6 +325,7 @@ mod tests {
                 last_modified: None,
             },
             DownloadProgress::default(),
+            None,
         )
         .await
         .unwrap();
@@ -354,6 +359,7 @@ mod tests {
                 last_modified: None,
             },
             DownloadProgress::default(),
+            None,
         )
         .await;
 
@@ -390,6 +396,7 @@ mod tests {
                 last_modified: None,
             },
             DownloadProgress::default(),
+            None,
         )
         .await;
 

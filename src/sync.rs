@@ -32,13 +32,19 @@ pub async fn run(
             .collect();
     }
 
+    let session = crate::crawler::session::ElscioneSession::new(
+        &config.server.base_url,
+        &config.server.user_agent,
+        config.server.cookie.as_deref(),
+    )?;
+
     // First run: open folder selector if no selections saved and no CLI include specified.
     let has_selections =
         crate::db::run_blocking(&db, |conn| Ok(models::has_any_selected_folders(conn)?)).await?;
 
     if !has_selections && opts.include.is_empty() {
         info!("No folder selections found — launching interactive selector.");
-        tui::run_folder_selector(&config, &db).await?;
+        tui::run_folder_selector(&config, &session, &db).await?;
     }
 
     // Merge DB selections with CLI --include overrides.
@@ -77,6 +83,7 @@ pub async fn run(
         info!("Starting crawl phase …");
         crawler::run(
             &config,
+            &session,
             &db,
             &include_folders,
             &opts.exclude,
@@ -84,7 +91,8 @@ pub async fn run(
         )
         .await?;
     } else {
-        info!("--resume: skipping crawl, downloading pending files only.");
+        info!("--resume: skipping crawl, verifying session clearance before download.");
+        session.ensure_cleared(&config.server.base_url).await?;
     }
 
     if cancel_token.is_cancelled() {
@@ -94,7 +102,7 @@ pub async fn run(
 
     // ── Download Phase ──
     info!("Starting download phase …");
-    downloader::run(&config, &db, opts.dry_run, cancel_token.clone()).await?;
+    downloader::run(&config, &session, &db, opts.dry_run, cancel_token.clone()).await?;
 
     if cancel_token.is_cancelled() {
         info!("Sync was cancelled by user.");

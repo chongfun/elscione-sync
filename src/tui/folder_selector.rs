@@ -96,17 +96,14 @@ impl App {
 
 /// Fetch top-level folders from the server and build FolderNode list.
 /// Uses the h5ai JSON API directly (the server is a JS-rendered h5ai instance).
-async fn fetch_folders(config: &Config) -> Result<Vec<FolderNode>> {
-    let session = ElscioneSession::new(
-        &config.server.base_url,
-        &config.server.user_agent,
-        config.server.cookie.as_deref(),
-    )?;
+async fn fetch_folders(config: &Config, session: &ElscioneSession) -> Result<Vec<FolderNode>> {
+    let limiter = crate::crawler::rate_limiter::RateLimiter::new(config.concurrency.crawl_delay_ms);
     info!("Fetching folder list from {}", config.server.base_url);
 
     // Try h5ai JSON API — this server is confirmed to run h5ai.
     match crate::crawler::try_h5ai(
-        &session,
+        session,
+        &limiter,
         &config.server.base_url,
         &config.server.base_url,
     )
@@ -290,10 +287,10 @@ fn event_loop(
 }
 
 /// Run the interactive TUI folder selector.
-pub async fn run(config: &Config, db: &Db) -> Result<()> {
+pub async fn run(config: &Config, session: &ElscioneSession, db: &Db) -> Result<()> {
     // Fetch top-level folders — print progress before entering raw mode.
     eprintln!("Fetching folder list from {} …", config.server.base_url);
-    let nodes = fetch_folders(config).await?;
+    let nodes = fetch_folders(config, session).await?;
     if nodes.is_empty() {
         eprintln!("Warning: no folders found on the server. The site may require JavaScript.");
         eprintln!("Try running with --verbose to see the raw server response.");

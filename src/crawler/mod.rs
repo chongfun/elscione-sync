@@ -20,16 +20,12 @@ use session::ElscioneSession;
 /// Crawl the server starting from the configured base URL.
 pub async fn run(
     config: &Config,
+    session: &ElscioneSession,
     db: &Db,
     include_overrides: &[String],
     exclude_overrides: &[String],
     cancel_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let session = ElscioneSession::new(
-        &config.server.base_url,
-        &config.server.user_agent,
-        config.server.cookie.as_deref(),
-    )?;
     let limiter = RateLimiter::new(config.concurrency.crawl_delay_ms);
 
     let include_folders: Vec<String> = if !include_overrides.is_empty() {
@@ -282,14 +278,14 @@ async fn fetch_directory(
     url: &str,
     base_url: &str,
 ) -> Result<Vec<parser::DirEntry>> {
-    limiter.wait().await;
-    try_h5ai(session, base_url, url).await
+    try_h5ai(session, limiter, base_url, url).await
 }
 
 /// Attempt to retrieve a directory listing via the h5ai JSON API.
 /// Returns an error if the API is unavailable or returns an invalid response.
 pub(crate) async fn try_h5ai(
     session: &ElscioneSession,
+    limiter: &RateLimiter,
     base_url: &str,
     dir_url: &str,
 ) -> Result<Vec<parser::DirEntry>> {
@@ -309,6 +305,7 @@ pub(crate) async fn try_h5ai(
     }
 
     // ── Step 1: GET the page to extract the h5ai CSRF token ("clckd"). ──────
+    limiter.wait().await;
     let (get_status, _headers, page_html) = session
         .get_html(dir_url)
         .await
@@ -348,6 +345,7 @@ pub(crate) async fn try_h5ai(
         headers.insert("x-h5ai-clckd", val);
     }
 
+    limiter.wait().await;
     let (post_status, _post_headers, text) = session
         .post_json(&api_url, &json_payload, Some(headers))
         .await
@@ -583,10 +581,78 @@ mod tests {
             .await;
 
         let session = ElscioneSession::new(&mock_server.uri(), "test-ua", None).unwrap();
+        let limiter = RateLimiter::new(0);
         let dir_url = format!("{}/dir/", mock_server.uri());
-        let entries = try_h5ai(&session, &mock_server.uri(), &dir_url).await.unwrap();
+        let entries = try_h5ai(&session, &limiter, &mock_server.uri(), &dir_url).await.unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "file.epub");
+    }
+
+    #[tokio::test]
+    async fn test_challenge_redirect_cookie_shared_with_binary_download() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        // 1. Initial request to /auth redirects to /welcome and sets cookie on the 302 redirect
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/auth"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(302)
+                    .append_header("Location", "/welcome")
+                    .append_header("Set-Cookie", "cf_clearance=redirect_secret_cookie; Path=/"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/welcome"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_string("<html><body>Welcome</body></html>"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // 2. Binary download request to /download.bin REQUIRES the cookie that was set during redirect
+        let binary_payload = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0x00];
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/download.bin"))
+            .and(wiremock::matchers::header("cookie", "cf_clearance=redirect_secret_cookie"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(binary_payload.clone()),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let session = ElscioneSession::new(&mock_server.uri(), "test-ua", None).unwrap();
+
+        // Perform initial clearance check through Ghostwire on /auth (follows redirect, sets cookie)
+        session.ensure_cleared(&format!("{}/auth", mock_server.uri())).await.unwrap();
+
+        // Download file through raw binary streaming client (reqwest::Client)
+        let temp_dir = std::env::temp_dir().join("elscione_test_redirect_cookie");
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let dest = temp_dir.join("download.bin");
+
+        let checksum = crate::downloader::file_writer::download_file(
+            session.http_client(),
+            crate::downloader::file_writer::DownloadRequest {
+                cookie: None,
+                url: &format!("{}/download.bin", mock_server.uri()),
+                dest_path: &dest,
+                last_modified: None,
+            },
+            crate::downloader::file_writer::DownloadProgress::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let data = tokio::fs::read(&dest).await.unwrap();
+        assert_eq!(data, binary_payload);
+        assert!(!checksum.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }
