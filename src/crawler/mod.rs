@@ -1,5 +1,6 @@
 pub mod parser;
 pub mod rate_limiter;
+pub mod session;
 
 use anyhow::{Context, Result};
 use chrono::DateTime;
@@ -13,7 +14,8 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::db::{models, Db};
-use rate_limiter::{build_client, RateLimiter};
+use rate_limiter::RateLimiter;
+use session::ElscioneSession;
 
 /// Crawl the server starting from the configured base URL.
 pub async fn run(
@@ -23,7 +25,11 @@ pub async fn run(
     exclude_overrides: &[String],
     cancel_token: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let client = build_client(&config.server.user_agent, config.server.cookie.as_deref())?;
+    let session = ElscioneSession::new(
+        &config.server.base_url,
+        &config.server.user_agent,
+        config.server.cookie.as_deref(),
+    )?;
     let limiter = RateLimiter::new(config.concurrency.crawl_delay_ms);
 
     let include_folders: Vec<String> = if !include_overrides.is_empty() {
@@ -74,7 +80,7 @@ pub async fn run(
     let mut visited: HashSet<String> = HashSet::new();
     let mut files_found: u64 = 0;
 
-    let sem = Arc::new(Semaphore::new(4));
+    let sem = Arc::new(Semaphore::new(config.concurrency.max_parallel_crawls));
 
     loop {
         if cancel_token.is_cancelled() {
@@ -139,7 +145,7 @@ pub async fn run(
             }
 
             let sem = sem.clone();
-            let client = client.clone();
+            let session = session.clone();
             let limiter = limiter.clone();
             let url = entry.url.clone();
             let base_url = config.server.base_url.clone();
@@ -160,21 +166,12 @@ pub async fn run(
                     _ = cancel_token.cancelled() => return None,
                 };
 
-                let mut ghost_client = match client.to_ghostwire() {
-                    Ok(gc) => gc,
-                    Err(e) => {
-                        warn!("Failed to create Ghostwire client: {e}");
-                        return None;
-                    }
-                };
-
-                let cookie = client.cookie.clone();
                 let mut attempts = 0;
                 let res = loop {
                     attempts += 1;
 
                     let res = tokio::select! {
-                        res = fetch_directory(&mut ghost_client, cookie.as_deref(), &limiter, &url, &base_url) => res,
+                        res = fetch_directory(&session, &limiter, &url, &base_url) => res,
                         _ = cancel_token.cancelled() => return None,
                     };
 
@@ -280,21 +277,19 @@ pub async fn run(
 
 /// Fetch a directory listing via the h5ai JSON API.
 async fn fetch_directory(
-    client: &mut ghostwire::Ghostwire,
-    cookie: Option<&str>,
+    session: &ElscioneSession,
     limiter: &RateLimiter,
     url: &str,
     base_url: &str,
 ) -> Result<Vec<parser::DirEntry>> {
     limiter.wait().await;
-    try_h5ai(client, cookie, base_url, url).await
+    try_h5ai(session, base_url, url).await
 }
 
 /// Attempt to retrieve a directory listing via the h5ai JSON API.
 /// Returns an error if the API is unavailable or returns an invalid response.
 pub(crate) async fn try_h5ai(
-    client: &mut ghostwire::Ghostwire,
-    cookie: Option<&str>,
+    session: &ElscioneSession,
     base_url: &str,
     dir_url: &str,
 ) -> Result<Vec<parser::DirEntry>> {
@@ -314,23 +309,27 @@ pub(crate) async fn try_h5ai(
     }
 
     // ── Step 1: GET the page to extract the h5ai CSRF token ("clckd"). ──────
-    let mut get_opts = ghostwire::RequestOptions::default();
-    if let Some(cookie_str) = cookie {
-        if let Ok(val) = reqwest::header::HeaderValue::from_str(cookie_str) {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::COOKIE, val);
-            get_opts.headers = Some(headers);
-        }
+    let (get_status, _headers, page_html) = session
+        .get_html(dir_url)
+        .await
+        .with_context(|| format!("h5ai page GET failed for {dir_url}"))?;
+
+    if !get_status.is_success() {
+        let title = parser::extract_title(&page_html);
+        anyhow::bail!(
+            "h5ai page GET returned HTTP {get_status} for {dir_url} (title: {title:?})"
+        );
     }
 
-    let page_html = client
-        .request(reqwest::Method::GET, dir_url, get_opts)
-        .await
-        .with_context(|| format!("h5ai page GET failed for {dir_url}"))?
-        .text()
-        .await
-        .with_context(|| format!("reading h5ai page body for {dir_url}"))?;
-    let clckd = extract_clckd(&page_html);
+    let clckd = match parser::extract_clckd(&page_html) {
+        Some(token) => token,
+        None => {
+            let title = parser::extract_title(&page_html);
+            anyhow::bail!(
+                "h5ai CSRF token ('clckd') not found in page HTML for {dir_url} (HTTP {get_status}, title: {title:?}). Server may require a Cloudflare session or have changed its markup."
+            );
+        }
+    };
 
     // ── Step 2: POST to the h5ai API. ────────────────────────────────────────
     // h5ai expects a raw JSON body with "items" (singular) containing the href.
@@ -344,56 +343,24 @@ pub(crate) async fn try_h5ai(
 
     let api_url = format!("{base}/?");
 
-    let mut opts = ghostwire::RequestOptions::default();
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "Content-Type",
-        reqwest::header::HeaderValue::from_static("application/json;charset=utf-8"),
-    );
-
-    if let Some(cookie_str) = cookie {
-        if let Ok(val) = reqwest::header::HeaderValue::from_str(cookie_str) {
-            headers.insert(reqwest::header::COOKIE, val);
-        }
+    if let Ok(val) = reqwest::header::HeaderValue::from_str(&clckd) {
+        headers.insert("x-h5ai-clckd", val);
     }
 
-    if let Some(token) = &clckd {
-        if let Ok(val) = reqwest::header::HeaderValue::from_str(token) {
-            headers.insert("x-h5ai-clckd", val);
-        }
-    }
-    opts.headers = Some(headers);
-    opts.body_bytes = Some(bytes::Bytes::from(serde_json::to_vec(&json_payload)?));
-
-    let resp = client
-        .request(reqwest::Method::POST, &api_url, opts)
+    let (post_status, _post_headers, text) = session
+        .post_json(&api_url, &json_payload, Some(headers))
         .await
         .with_context(|| format!("h5ai API POST failed for {api_url}"))?;
 
-    let status = resp.status();
-
-    if !status.is_success() {
-        anyhow::bail!("h5ai API returned HTTP {status} for {api_url}");
+    if !post_status.is_success() {
+        anyhow::bail!("h5ai API returned HTTP {post_status} for {api_url}");
     }
-
-    let text = resp
-        .text()
-        .await
-        .with_context(|| format!("reading h5ai API body for {api_url}"))?;
 
     let json: serde_json::Value =
         serde_json::from_str(&text).with_context(|| format!("parsing h5ai JSON from {api_url}"))?;
 
     parse_h5ai_response(&json, base, &href)
-}
-
-/// Extract the h5ai CSRF token from the `<meta name="clckd">` tag.
-fn extract_clckd(html: &str) -> Option<String> {
-    // Look for: <meta name="clckd" content="HEXTOKEN" />
-    let needle = r#"name="clckd" content=""#;
-    let start = html.find(needle)? + needle.len();
-    let end = html[start..].find('"')? + start;
-    Some(html[start..end].to_owned())
 }
 
 /// Parse an h5ai JSON API response into `DirEntry` values.
@@ -551,14 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_clckd_finds_meta_token() {
-        let html = r#"<head><meta name="clckd" content="abc123"/></head>"#;
-
-        assert_eq!(extract_clckd(html), Some("abc123".to_owned()));
-        assert_eq!(extract_clckd("<html></html>"), None);
-    }
-
-    #[test]
     fn exclude_patterns_with_slash_glob_the_full_path() {
         let patterns = vec!["Manga/**".to_owned()];
 
@@ -590,5 +549,44 @@ mod tests {
             url_to_path("https://other.test/x", "https://example.test/"),
             "https://other.test/x"
         );
+    }
+
+    #[tokio::test]
+    async fn test_session_cookie_reuse() {
+        let mock_server = wiremock::MockServer::start().await;
+
+        // Step 1: Initial page GET returns Set-Cookie and clckd meta
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/dir/"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .append_header("Set-Cookie", "cf_clearance=valid_clearance_123; Path=/")
+                    .set_body_string(r#"<html><head><meta name="clckd" content="test_clckd_token"></head><body></body></html>"#),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Step 2: API POST requires Cookie: cf_clearance=valid_clearance_123 and x-h5ai-clckd header
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/"))
+            .and(wiremock::matchers::header("x-h5ai-clckd", "test_clckd_token"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "items": [
+                            { "href": "/dir/" },
+                            { "href": "/dir/file.epub", "time": 1000, "size": 100 }
+                        ]
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let session = ElscioneSession::new(&mock_server.uri(), "test-ua", None).unwrap();
+        let dir_url = format!("{}/dir/", mock_server.uri());
+        let entries = try_h5ai(&session, &mock_server.uri(), &dir_url).await.unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "file.epub");
     }
 }

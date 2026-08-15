@@ -1,58 +1,105 @@
-use anyhow::Result;
-use std::time::Duration;
-use tokio::time::sleep;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
+struct RateLimiterState {
+    next_allowed: Instant,
+}
 
 /// Controls the delay between outbound requests to avoid hammering the server.
+///
+/// Thread-safe and stateful: schedules request slots sequentially so concurrent tasks
+/// do not burst simultaneously.
 #[derive(Clone)]
 pub struct RateLimiter {
-    delay_ms: u64,
+    state: Arc<Mutex<RateLimiterState>>,
+    delay: Duration,
 }
 
 impl RateLimiter {
     pub fn new(delay_ms: u64) -> Self {
-        Self { delay_ms }
+        Self {
+            state: Arc::new(Mutex::new(RateLimiterState {
+                next_allowed: Instant::now(),
+            })),
+            delay: Duration::from_millis(delay_ms),
+        }
     }
 
-    /// Sleep for the configured inter-request delay.
+    /// Wait until the next allowed request slot arrives.
+    ///
+    /// Atomically claims a slot so concurrent tasks are spaced apart by at least `delay_ms`.
     pub async fn wait(&self) {
-        sleep(Duration::from_millis(self.delay_ms)).await;
+        if self.delay.is_zero() {
+            return;
+        }
+
+        let target = {
+            let mut state = self.state.lock().await;
+            let now = Instant::now();
+            let scheduled = if state.next_allowed > now {
+                state.next_allowed
+            } else {
+                now
+            };
+            state.next_allowed = scheduled + self.delay;
+            scheduled
+        };
+
+        let now = Instant::now();
+        if target > now {
+            tokio::time::sleep(target - now).await;
+        }
     }
 }
 
-#[derive(Clone)]
-pub struct GhostClient {
-    builder: ghostwire::GhostwireBuilder,
-    pub cookie: Option<String>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl GhostClient {
-    pub fn new(builder: ghostwire::GhostwireBuilder, cookie: Option<String>) -> Self {
-        Self { builder, cookie }
+    #[tokio::test]
+    async fn test_rate_limiter_paces_concurrent_tasks() {
+        let delay_ms = 40;
+        let limiter = RateLimiter::new(delay_ms);
+        let start = Instant::now();
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let lim = limiter.clone();
+            handles.push(tokio::spawn(async move {
+                lim.wait().await;
+                Instant::now()
+            }));
+        }
+
+        let mut timestamps = Vec::new();
+        for h in handles {
+            timestamps.push(h.await.unwrap());
+        }
+
+        timestamps.sort();
+
+        // The 4 requests should span at least 3 * delay_ms = 120ms
+        let total_span = timestamps.last().unwrap().duration_since(*timestamps.first().unwrap());
+        assert!(
+            total_span >= Duration::from_millis(delay_ms * 3 - 15),
+            "Expected span >= ~{}ms but got {:?}",
+            delay_ms * 3,
+            total_span
+        );
+
+        // Verify each consecutive slot is spaced
+        for i in 1..timestamps.len() {
+            let diff = timestamps[i].duration_since(timestamps[i - 1]);
+            assert!(
+                diff >= Duration::from_millis(delay_ms - 15),
+                "Task {} and {} spaced by only {:?}",
+                i - 1,
+                i,
+                diff
+            );
+        }
+
+        let _ = start;
     }
-
-    pub fn to_ghostwire(&self) -> Result<ghostwire::Ghostwire> {
-        self.builder.clone().build().map_err(|e| anyhow::anyhow!(e))
-    }
-}
-
-/// Build a Ghostwire client wrapper configured in stealth mode.
-pub fn build_client(user_agent: &str, cookie: Option<&str>) -> Result<GhostClient> {
-    let user_agent_opts = ghostwire::UserAgentOptions {
-        custom: Some(user_agent.to_string()),
-        ..Default::default()
-    };
-
-    let builder = ghostwire::Ghostwire::builder()
-        .user_agent_opts(user_agent_opts)
-        .min_request_interval_secs(0.0) // Respect rate limiting from RateLimiter
-        .stealth(ghostwire::StealthConfig {
-            enabled: true,
-            human_like_delays: false, // Respect rate limiting from RateLimiter
-            randomize_headers: true,
-            browser_quirks: true,
-            min_delay_secs: 0.0,
-            max_delay_secs: 0.0,
-        });
-
-    Ok(GhostClient::new(builder, cookie.map(|s| s.to_string())))
 }

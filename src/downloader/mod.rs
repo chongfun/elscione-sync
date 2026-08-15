@@ -8,7 +8,8 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
-use crate::crawler::rate_limiter::{build_client, RateLimiter};
+use crate::crawler::rate_limiter::RateLimiter;
+use crate::crawler::session::ElscioneSession;
 use crate::db::{models, Db};
 
 const DOWNLOAD_BATCH_SIZE: usize = 128;
@@ -61,7 +62,11 @@ pub async fn run(
         );
     }
 
-    let client = build_client(&config.server.user_agent, config.server.cookie.as_deref())?;
+    let session = ElscioneSession::new(
+        &config.server.base_url,
+        &config.server.user_agent,
+        config.server.cookie.as_deref(),
+    )?;
     let limiter = RateLimiter::new(config.concurrency.delay_between_requests_ms);
     let semaphore = Arc::new(Semaphore::new(config.concurrency.max_parallel_downloads));
     let multi = MultiProgress::new();
@@ -186,7 +191,8 @@ pub async fn run(
                 .await?;
             }
 
-            let client = client.clone();
+            let http_client = session.http_client().clone();
+            let cookie_str = config.server.cookie.clone();
             let limiter = limiter.clone();
             let db = db.clone();
             let output_dir = output_dir.clone();
@@ -210,21 +216,6 @@ pub async fn run(
                         }
                     },
                     _ = cancel_token.cancelled() => {
-                        return;
-                    }
-                };
-
-                let mut ghost_client = match client.to_ghostwire() {
-                    Ok(gc) => gc,
-                    Err(e) => {
-                        warn!("Failed to create Ghostwire client: {e}");
-                        let record_id = record.id;
-                        let _ = crate::db::run_blocking(&db, move |conn| {
-                            Ok(models::set_file_status(
-                                conn, record_id, "pending", None, None,
-                            )?)
-                        })
-                        .await;
                         return;
                     }
                 };
@@ -328,9 +319,9 @@ pub async fn run(
                     }
 
                     let download_fut = file_writer::download_file(
-                        &mut ghost_client,
+                        &http_client,
                         file_writer::DownloadRequest {
-                            cookie: client.cookie.as_deref(),
+                            cookie: cookie_str.as_deref(),
                             url: &record.remote_url,
                             dest_path: &dest_path,
                             last_modified: record.last_modified.as_deref(),
@@ -358,17 +349,12 @@ pub async fn run(
 
                     match result {
                         Ok(checksum) => {
-                            // Force the progress bar to 100% and finish it so it stops ticking.
                             if let Some(len) = pb.length() {
                                 pb.set_position(len);
                             }
                             pb.finish_and_clear();
-
-                            // Explicitly remove it from MultiProgress to prevent memory/redraw leaks
-                            // over long syncs.
                             multi.remove(&pb);
 
-                            // Print a clean, permanent success line
                             let size_str =
                                 bytesize::ByteSize(record.size_bytes.unwrap_or(0) as u64)
                                     .to_string();
@@ -388,47 +374,199 @@ pub async fn run(
                             .await;
                             break;
                         }
-                        Err(e) => {
-                            if attempts >= max_attempts {
-                                pb.finish_and_clear();
-                                multi.remove(&pb);
-                                let _ = multi.println(format!(
-                                    "  ✗ {} (failed after {} attempts): {}",
-                                    record.remote_path, attempts, e
-                                ));
-                                let record_id = record.id;
-                                let err_msg = e.to_string();
-                                let _ = crate::db::run_blocking(&db, move |conn| {
-                                    Ok(models::record_error(conn, record_id, &err_msg)?)
-                                })
-                                .await;
-                                break;
-                            } else {
-                                let _ = multi.println(format!(
-                                    "  ⚠ {} failed (attempt {}): {}. Retrying in {}s...",
-                                    file_name, attempts, e, backoff
-                                ));
+                        Err(download_err) => {
+                            match download_err {
+                                file_writer::DownloadError::HttpStatus {
+                                    status,
+                                    retry_after,
+                                    url: _,
+                                } => {
+                                    if status == reqwest::StatusCode::NOT_FOUND
+                                        || status == reqwest::StatusCode::GONE
+                                    {
+                                        pb.finish_and_clear();
+                                        multi.remove(&pb);
+                                        let _ = multi.println(format!(
+                                            "  ✗ {} (HTTP {}): skipping retries for missing resource",
+                                            record.remote_path, status
+                                        ));
+                                        let record_id = record.id;
+                                        let err_msg = format!("HTTP {}", status);
+                                        let _ = crate::db::run_blocking(&db, move |conn| {
+                                            Ok(models::record_error(conn, record_id, &err_msg)?)
+                                        })
+                                        .await;
+                                        break;
+                                    } else if status == reqwest::StatusCode::FORBIDDEN {
+                                        pb.finish_and_clear();
+                                        multi.remove(&pb);
+                                        let _ = multi.println(format!(
+                                            "  ✗ {} (HTTP 403 Forbidden): session/clearance rejected; stopping retries",
+                                            record.remote_path
+                                        ));
+                                        let record_id = record.id;
+                                        let err_msg = "HTTP 403 Forbidden".to_string();
+                                        let _ = crate::db::run_blocking(&db, move |conn| {
+                                            Ok(models::record_error(conn, record_id, &err_msg)?)
+                                        })
+                                        .await;
+                                        break;
+                                    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                                        let wait_dur = retry_after.unwrap_or_else(|| {
+                                            std::time::Duration::from_secs(backoff)
+                                        });
+                                        let wait_secs =
+                                            wait_dur.as_secs().max(1).min(backoff_max);
+                                        let _ = multi.println(format!(
+                                            "  ⚠ {} rate limited (HTTP 429). Retrying in {}s...",
+                                            file_name, wait_secs
+                                        ));
 
-                                // Sleep and wait for backoff or cancellation
-                                let sleep_res = tokio::select! {
-                                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => Ok(()),
-                                    _ = cancel_token.cancelled() => Err(()),
-                                };
-                                if sleep_res.is_err() {
-                                    pb.finish_and_clear();
-                                    multi.remove(&pb);
-                                    let record_id = record.id;
-                                    let _ = crate::db::run_blocking(&db, move |conn| {
-                                        Ok(models::set_file_status(
-                                            conn, record_id, "pending", None, None,
-                                        )?)
-                                    })
-                                    .await;
-                                    return;
+                                        let sleep_res = tokio::select! {
+                                            _ = tokio::time::sleep(std::time::Duration::from_secs(wait_secs)) => Ok(()),
+                                            _ = cancel_token.cancelled() => Err(()),
+                                        };
+                                        if sleep_res.is_err() {
+                                            pb.finish_and_clear();
+                                            multi.remove(&pb);
+                                            let record_id = record.id;
+                                            let _ = crate::db::run_blocking(&db, move |conn| {
+                                                Ok(models::set_file_status(
+                                                    conn, record_id, "pending", None, None,
+                                                )?)
+                                            })
+                                            .await;
+                                            return;
+                                        }
+                                        backoff = (backoff as f64 * backoff_mult)
+                                            .min(backoff_max as f64)
+                                            as u64;
+                                    } else {
+                                        // 5xx server errors or other HTTP status
+                                        if attempts >= max_attempts {
+                                            pb.finish_and_clear();
+                                            multi.remove(&pb);
+                                            let _ = multi.println(format!(
+                                                "  ✗ {} (failed after {} attempts): HTTP {}",
+                                                record.remote_path, attempts, status
+                                            ));
+                                            let record_id = record.id;
+                                            let err_msg = format!("HTTP {}", status);
+                                            let _ = crate::db::run_blocking(&db, move |conn| {
+                                                Ok(models::record_error(conn, record_id, &err_msg)?)
+                                            })
+                                            .await;
+                                            break;
+                                        } else {
+                                            let _ = multi.println(format!(
+                                                "  ⚠ {} failed (attempt {}): HTTP {}. Retrying in {}s...",
+                                                file_name, attempts, status, backoff
+                                            ));
+
+                                            let sleep_res = tokio::select! {
+                                                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => Ok(()),
+                                                _ = cancel_token.cancelled() => Err(()),
+                                            };
+                                            if sleep_res.is_err() {
+                                                pb.finish_and_clear();
+                                                multi.remove(&pb);
+                                                let record_id = record.id;
+                                                let _ = crate::db::run_blocking(&db, move |conn| {
+                                                    Ok(models::set_file_status(
+                                                        conn, record_id, "pending", None, None,
+                                                    )?)
+                                                })
+                                                .await;
+                                                return;
+                                            }
+                                            backoff = (backoff as f64 * backoff_mult)
+                                                .min(backoff_max as f64)
+                                                as u64;
+                                        }
+                                    }
                                 }
-
-                                backoff =
-                                    (backoff as f64 * backoff_mult).min(backoff_max as f64) as u64;
+                                file_writer::DownloadError::Io(e) => {
+                                    if attempts >= max_attempts {
+                                        pb.finish_and_clear();
+                                        multi.remove(&pb);
+                                        let _ = multi.println(format!(
+                                            "  ✗ {} (IO error after {} attempts): {}",
+                                            record.remote_path, attempts, e
+                                        ));
+                                        let record_id = record.id;
+                                        let err_msg = e.to_string();
+                                        let _ = crate::db::run_blocking(&db, move |conn| {
+                                            Ok(models::record_error(conn, record_id, &err_msg)?)
+                                        })
+                                        .await;
+                                        break;
+                                    } else {
+                                        let _ = multi.println(format!(
+                                            "  ⚠ {} IO error (attempt {}): {}. Retrying in {}s...",
+                                            file_name, attempts, e, backoff
+                                        ));
+                                        let sleep_res = tokio::select! {
+                                            _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => Ok(()),
+                                            _ = cancel_token.cancelled() => Err(()),
+                                        };
+                                        if sleep_res.is_err() {
+                                            pb.finish_and_clear();
+                                            multi.remove(&pb);
+                                            let record_id = record.id;
+                                            let _ = crate::db::run_blocking(&db, move |conn| {
+                                                Ok(models::set_file_status(
+                                                    conn, record_id, "pending", None, None,
+                                                )?)
+                                            })
+                                            .await;
+                                            return;
+                                        }
+                                        backoff = (backoff as f64 * backoff_mult)
+                                            .min(backoff_max as f64)
+                                            as u64;
+                                    }
+                                }
+                                file_writer::DownloadError::Other(e) => {
+                                    if attempts >= max_attempts {
+                                        pb.finish_and_clear();
+                                        multi.remove(&pb);
+                                        let _ = multi.println(format!(
+                                            "  ✗ {} (failed after {} attempts): {}",
+                                            record.remote_path, attempts, e
+                                        ));
+                                        let record_id = record.id;
+                                        let err_msg = e.to_string();
+                                        let _ = crate::db::run_blocking(&db, move |conn| {
+                                            Ok(models::record_error(conn, record_id, &err_msg)?)
+                                        })
+                                        .await;
+                                        break;
+                                    } else {
+                                        let _ = multi.println(format!(
+                                            "  ⚠ {} failed (attempt {}): {}. Retrying in {}s...",
+                                            file_name, attempts, e, backoff
+                                        ));
+                                        let sleep_res = tokio::select! {
+                                            _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => Ok(()),
+                                            _ = cancel_token.cancelled() => Err(()),
+                                        };
+                                        if sleep_res.is_err() {
+                                            pb.finish_and_clear();
+                                            multi.remove(&pb);
+                                            let record_id = record.id;
+                                            let _ = crate::db::run_blocking(&db, move |conn| {
+                                                Ok(models::set_file_status(
+                                                    conn, record_id, "pending", None, None,
+                                                )?)
+                                            })
+                                            .await;
+                                            return;
+                                        }
+                                        backoff = (backoff as f64 * backoff_mult)
+                                            .min(backoff_max as f64)
+                                            as u64;
+                                    }
+                                }
                             }
                         }
                     }

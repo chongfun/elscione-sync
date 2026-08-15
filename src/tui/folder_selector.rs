@@ -17,7 +17,7 @@ use std::io;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::crawler::{parser, rate_limiter::build_client};
+use crate::crawler::{parser, session::ElscioneSession};
 use crate::db::{models, Db};
 
 /// A folder node in the checkbox tree.
@@ -97,14 +97,16 @@ impl App {
 /// Fetch top-level folders from the server and build FolderNode list.
 /// Uses the h5ai JSON API directly (the server is a JS-rendered h5ai instance).
 async fn fetch_folders(config: &Config) -> Result<Vec<FolderNode>> {
-    let client = build_client(&config.server.user_agent, config.server.cookie.as_deref())?;
-    let mut ghostwire_client = client.to_ghostwire()?;
+    let session = ElscioneSession::new(
+        &config.server.base_url,
+        &config.server.user_agent,
+        config.server.cookie.as_deref(),
+    )?;
     info!("Fetching folder list from {}", config.server.base_url);
 
     // Try h5ai JSON API — this server is confirmed to run h5ai.
     match crate::crawler::try_h5ai(
-        &mut ghostwire_client,
-        client.cookie.as_deref(),
+        &session,
         &config.server.base_url,
         &config.server.base_url,
     )

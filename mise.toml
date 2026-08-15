@@ -1,3 +1,2 @@
 [tools]
-cargo = "latest"
-rust = "1.95"
+rust = "latest"

@@ -57,6 +57,9 @@ impl Default for OutputConfig {
 pub struct ConcurrencyConfig {
     /// Maximum number of simultaneous file downloads.
     pub max_parallel_downloads: usize,
+    /// Maximum number of simultaneous directory crawl tasks.
+    #[serde(default = "default_max_parallel_crawls")]
+    pub max_parallel_crawls: usize,
     /// Milliseconds to wait between HTTP requests (crawl + download).
     pub delay_between_requests_ms: u64,
     /// Milliseconds to wait between directory crawl requests specifically.
@@ -64,6 +67,10 @@ pub struct ConcurrencyConfig {
     /// Maximum retry attempts for directory crawling fetches.
     #[serde(default = "default_max_crawl_retries")]
     pub max_crawl_retries: usize,
+}
+
+fn default_max_parallel_crawls() -> usize {
+    1
 }
 
 fn default_max_crawl_retries() -> usize {
@@ -74,6 +81,7 @@ impl Default for ConcurrencyConfig {
     fn default() -> Self {
         Self {
             max_parallel_downloads: 2,
+            max_parallel_crawls: 1,
             delay_between_requests_ms: 1500,
             crawl_delay_ms: 500,
             max_crawl_retries: 3,
@@ -191,6 +199,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.concurrency.max_parallel_downloads < 1 {
             anyhow::bail!("concurrency.max_parallel_downloads must be >= 1");
+        }
+        if self.concurrency.max_parallel_crawls < 1 {
+            anyhow::bail!("concurrency.max_parallel_crawls must be >= 1");
         }
         if self.rate_limit.backoff_multiplier < 1.0 {
             anyhow::bail!("rate_limit.backoff_multiplier must be >= 1.0");
